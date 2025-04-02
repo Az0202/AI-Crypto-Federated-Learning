@@ -1,0 +1,14 @@
+[
+  {
+    "inputs": [
+      {"name": "contributionId", "type": "string"},
+      {"name": "metrics", "type": "string"},
+      {"name": "passed", "type": "bool"},
+      {"name": "reason", "type": "string"}
+    ],
+    "name": "verifyContribution",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  }
+] 

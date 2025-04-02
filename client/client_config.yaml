@@ -1,0 +1,96 @@
+# Federated Learning Client Configuration
+
+# API Connection Settings
+api:
+  base_url: http://localhost:8000
+  api_version: v1
+  timeout_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 5
+
+# Blockchain Settings
+blockchain:
+  network: localhost               # Options: localhost, rinkeby, mainnet
+  provider_url: http://localhost:8545
+  chain_id: 1337                   # 1337 for localhost, 4 for rinkeby, 1 for mainnet
+  gas_limit: 3000000
+  gas_price_strategy: medium       # Options: slow, medium, fast, custom
+  contract_addresses:
+    contribution_logging: "0x0000000000000000000000000000000000000000"  # To be filled by deployment
+    fed_learning_token: "0x0000000000000000000000000000000000000000"    # To be filled by deployment
+    quality_verification: "0x0000000000000000000000000000000000000000"  # To be filled by deployment
+    reward_distribution: "0x0000000000000000000000000000000000000000"   # To be filled by deployment
+    governance: "0x0000000000000000000000000000000000000000"            # To be filled by deployment
+
+# Privacy Settings
+privacy:
+  differential_privacy:
+    enabled: true
+    epsilon: 0.5                   # Privacy budget (lower = more privacy)
+    delta: 1.0e-5                  # Failure probability
+    mechanism: gaussian            # Options: gaussian, laplace
+    clip_norm: 1.0                 # Gradient clipping norm
+    noise_multiplier: 1.1          # Noise multiplier for privacy
+  secure_aggregation:
+    enabled: false                 # Whether to use secure aggregation protocols
+    encryption_type: paillier      # Options: paillier, he_seal
+
+# Training Settings
+training:
+  max_epochs: 5                    # Maximum number of local training epochs
+  batch_size: 32                   # Batch size for local training
+  learning_rate: 0.01              # Learning rate for local training
+  optimizer: adam                  # Options: sgd, adam, rmsprop
+  loss_function: cross_entropy     # Options: cross_entropy, mse, mae
+  metrics: [accuracy, f1]          # Metrics to track during training
+  early_stopping:
+    enabled: true
+    patience: 3
+    min_delta: 0.001
+  checkpoint_dir: ./checkpoints    # Directory to save model checkpoints
+  max_training_time_seconds: 1800  # 30 minutes max training time
+  device: auto                     # Options: cpu, cuda, auto
+
+# Data Settings
+data:
+  cache_dir: ./data_cache          # Directory to cache downloaded data
+  max_cache_size_mb: 1000          # Maximum cache size in MB
+  augmentation:
+    enabled: true
+    techniques: [flip, rotate, zoom]
+  preprocessing:
+    normalization: standard        # Options: standard, minmax, none
+    handle_missing: mean           # Options: mean, median, drop, zero
+  validation_split: 0.2            # Fraction of data to use for validation
+
+# System Settings
+system:
+  log_level: info                  # Options: debug, info, warning, error
+  log_file: ./client.log
+  temp_dir: ./tmp
+  max_memory_percent: 80           # Maximum memory usage percentage
+  multiprocessing: true            # Whether to use multiprocessing
+  num_workers: 4                   # Number of worker processes for data loading
+  random_seed: 42                  # Random seed for reproducibility
+  keep_alive_interval_seconds: 60  # Heartbeat interval for long-running operations
+
+# Contribution Settings
+contribution:
+  min_samples: 100                 # Minimum number of samples required for contribution
+  verification_metrics: [loss, accuracy]  # Metrics to provide for verification
+  encrypt_contributions: true      # Whether to encrypt model contributions
+  compression:
+    enabled: true
+    algorithm: zstd                # Options: zstd, gzip, none
+    level: 3                       # Compression level (higher = more compression)
+  upload_retry_attempts: 3         # Number of upload retry attempts
+  model_update_format: diff        # Options: diff, full (diff = only weight changes)
+
+# User Interface Settings
+ui:
+  progress_bar: true               # Whether to show progress bars
+  verbose_output: true             # Whether to show detailed output
+  auto_update: true                # Whether to automatically check for client updates
+  telemetry:
+    enabled: false                 # Whether to collect anonymous usage statistics
+    collection_interval_hours: 24  # How often to collect telemetry 

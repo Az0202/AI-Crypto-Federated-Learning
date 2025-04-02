@@ -1,0 +1,38 @@
+[
+  {
+    "inputs": [
+      {"name": "contributionId", "type": "string"},
+      {"name": "recipient", "type": "address"},
+      {"name": "accuracy", "type": "uint256"},
+      {"name": "datasetSize", "type": "uint256"},
+      {"name": "round", "type": "uint256"}
+    ],
+    "name": "issueReward",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"name": "accuracy", "type": "uint256"},
+      {"name": "datasetSize", "type": "uint256"}
+    ],
+    "name": "calculateReward",
+    "outputs": [{"name": "", "type": "uint256"}],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "policy",
+    "outputs": [
+      {"name": "baseReward", "type": "uint256"},
+      {"name": "accuracyMultiplier", "type": "uint256"},
+      {"name": "datasetSizeMultiplier", "type": "uint256"},
+      {"name": "maxReward", "type": "uint256"},
+      {"name": "roundRewardBudget", "type": "uint256"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+] 

@@ -1,0 +1,51 @@
+[
+  {
+    "inputs": [
+      {"name": "title", "type": "string"},
+      {"name": "description", "type": "string"},
+      {"name": "targetContract", "type": "address"},
+      {"name": "callData", "type": "bytes"}
+    ],
+    "name": "createProposal",
+    "outputs": [{"name": "proposalId", "type": "uint256"}],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"name": "proposalId", "type": "uint256"},
+      {"name": "inSupport", "type": "bool"}
+    ],
+    "name": "castVote",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [{"name": "proposalId", "type": "uint256"}],
+    "name": "getProposalDetails",
+    "outputs": [
+      {"name": "title", "type": "string"},
+      {"name": "description", "type": "string"},
+      {"name": "proposer", "type": "address"},
+      {"name": "createdAt", "type": "uint256"},
+      {"name": "votingEndsAt", "type": "uint256"},
+      {"name": "status", "type": "uint8"},
+      {"name": "yesVotes", "type": "uint256"},
+      {"name": "noVotes", "type": "uint256"},
+      {"name": "executed", "type": "bool"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {"indexed": true, "name": "proposalId", "type": "uint256"},
+      {"indexed": true, "name": "proposer", "type": "address"},
+      {"indexed": false, "name": "title", "type": "string"}
+    ],
+    "name": "ProposalCreated",
+    "type": "event"
+  }
+] 

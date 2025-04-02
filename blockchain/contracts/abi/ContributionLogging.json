@@ -1,0 +1,48 @@
+[
+  {
+    "inputs": [
+      {"name": "contributionId", "type": "string"},
+      {"name": "clientId", "type": "string"},
+      {"name": "round", "type": "uint256"},
+      {"name": "metricsJson", "type": "string"},
+      {"name": "modelVersion", "type": "string"},
+      {"name": "updateHash", "type": "string"}
+    ],
+    "name": "logContribution",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {"name": "aggregationId", "type": "string"},
+      {"name": "round", "type": "uint256"},
+      {"name": "modelVersion", "type": "string"},
+      {"name": "modelHash", "type": "string"},
+      {"name": "contributionIds", "type": "string[]"}
+    ],
+    "name": "logAggregation",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [{"name": "contributionId", "type": "string"}],
+    "name": "contributions",
+    "outputs": [
+      {"name": "contributor", "type": "address"},
+      {"name": "clientId", "type": "string"},
+      {"name": "round", "type": "uint256"},
+      {"name": "timestamp", "type": "uint256"},
+      {"name": "metricsJson", "type": "string"},
+      {"name": "modelVersion", "type": "string"},
+      {"name": "updateHash", "type": "string"},
+      {"name": "qualityVerified", "type": "bool"},
+      {"name": "rewardIssued", "type": "bool"},
+      {"name": "rewardAmount", "type": "uint256"},
+      {"name": "aggregationId", "type": "string"}
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+] 

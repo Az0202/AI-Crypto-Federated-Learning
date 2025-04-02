@@ -1,0 +1,31 @@
+{
+  "provider_url": "http://localhost:8545",
+  "chain_id": 1337,
+  "gas_limit": 3000000,
+  "key_env_var": "PRIVATE_KEY",
+  "gas_price_multiplier": 1.1,
+  "wait_for_receipt": true,
+  "use_poa_middleware": true,
+  "contracts": {
+    "ContributionLogging": {
+      "address": "0x1234567890123456789012345678901234567890",
+      "abi_path": "blockchain/contracts/abi/ContributionLogging.json"
+    },
+    "QualityVerification": {
+      "address": "0x2345678901234567890123456789012345678901",
+      "abi_path": "blockchain/contracts/abi/QualityVerification.json"
+    },
+    "RewardDistribution": {
+      "address": "0x3456789012345678901234567890123456789012",
+      "abi_path": "blockchain/contracts/abi/RewardDistribution.json"
+    },
+    "FedLearningToken": {
+      "address": "0x4567890123456789012345678901234567890123",
+      "abi_path": "blockchain/contracts/abi/FedLearningToken.json"
+    },
+    "FLGovernance": {
+      "address": "0x5678901234567890123456789012345678901234",
+      "abi_path": "blockchain/contracts/abi/FLGovernance.json"
+    }
+  }
+} 

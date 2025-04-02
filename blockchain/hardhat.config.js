@@ -19,7 +19,9 @@ const MAINNET_URL = process.env.MAINNET_RPC_URL || 'https://eth-mainnet.g.alchem
 // Etherscan API key for contract verification
 const ETHERSCAN_API_KEY = process.env.ETHERSCAN_API_KEY || '';
 
-// Export Hardhat config
+/**
+ * @type import('hardhat/config').HardhatUserConfig
+ */
 module.exports = {
   solidity: {
     version: '0.8.17',
@@ -32,7 +34,13 @@ module.exports = {
   },
   networks: {
     hardhat: {
-      chainId: 1337
+      chainId: 1337,
+      accounts: {
+        mnemonic: "test test test test test test test test test test test junk",
+        path: "m/44'/60'/0'/0",
+        initialIndex: 0,
+        count: 20
+      }
     },
     localhost: {
       url: LOCALHOST_URL,
@@ -62,7 +70,9 @@ module.exports = {
     noColors: process.env.CI === 'true',
     coinmarketcap: process.env.COINMARKETCAP_API_KEY || '',
     token: 'ETH',
-    gasPriceApi: 'https://api.etherscan.io/api?module=proxy&action=eth_gasPrice'
+    gasPriceApi: 'https://api.etherscan.io/api?module=proxy&action=eth_gasPrice',
+    excludeContracts: [],
+    src: './contracts'
   },
   etherscan: {
     apiKey: ETHERSCAN_API_KEY
@@ -81,5 +91,25 @@ module.exports = {
     tests: './test',
     cache: './cache',
     artifacts: './artifacts'
+  },
+  // Solidity coverage configuration
+  coverage: {
+    provider: "hardhat",
+    // Files to exclude from coverage report
+    skipFiles: [
+      "mocks/",
+      "interfaces/"
+    ],
+    // Coverage threshold requirements
+    istanbulReporter: ['html', 'lcov', 'text', 'json'],
+    // Enforce coverage thresholds
+    coverageThreshold: {
+      global: {
+        statements: 90,
+        branches: 85,
+        functions: 90,
+        lines: 90
+      }
+    }
   }
 };
