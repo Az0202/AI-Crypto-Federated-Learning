@@ -1,1875 +1,1335 @@
 """
-Optimized Aggregation Algorithms for Large Models
+Optimized Blockchain Transaction Manager
 
-This module provides efficient implementations of aggregation algorithms for federated learning
-with a focus on handling large neural network models with memory efficiency and performance.
+This module provides optimized blockchain transaction handling with features like:
+- Automatic nonce management for concurrent transactions
+- Exponential backoff retry with dynamic gas price adjustment
+- Transaction batching for gas optimization
+- Asynchronous transaction confirmation
+- Transaction queue management
 """
 
-import numpy as np
-import tensorflow as tf
 import logging
 import time
-from typing import Dict, List, Any, Tuple, Optional, Union, Callable
-import concurrent.futures
+import asyncio
+from typing import Dict, Any, List, Optional, Callable, Union, Tuple
+import aiohttp
+import json
+from web3 import Web3
+from web3.exceptions import TransactionNotFound, TimeExhausted
+from eth_account.signers.local import LocalAccount
 import threading
-import queue
 from dataclasses import dataclass
-import psutil
-import gc
-import math
-from collections import defaultdict
+from enum import Enum
+import heapq
+import random
 
 logger = logging.getLogger(__name__)
 
+class TransactionStatus(Enum):
+    """Status of a blockchain transaction."""
+    QUEUED = 0
+    PENDING = 1
+    SUBMITTED = 2
+    CONFIRMED = 3
+    FAILED = 4
+    DROPPED = 5
+
 @dataclass
-class ContributionInfo:
-    """Information about a contribution for aggregation."""
-    client_id: str
-    metrics: Dict[str, Any]
-    weight: float = 1.0  # Relative weight for aggregation
+class TransactionRequest:
+    """A request to execute a blockchain transaction."""
+    contract_name: str
+    function_name: str
+    args: tuple
+    kwargs: dict
+    priority: int = 1  # 1 is highest priority, larger numbers are lower priority
+    max_attempts: int = 3
+    attempts: int = 0
+    created_at: float = 0.0
+    submitted_at: float = 0.0
+    tx_hash: Optional[str] = None
+    status: TransactionStatus = TransactionStatus.QUEUED
+    callback: Optional[Callable] = None
+    result: Any = None
+    error: Optional[Exception] = None
     
-    def __str__(self):
-        return f"ContributionInfo(client_id={self.client_id}, weight={self.weight})"
+    def __post_init__(self):
+        if self.created_at == 0.0:
+            self.created_at = time.time()
+    
+    # For priority queue comparison
+    def __lt__(self, other):
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        return self.created_at < other.created_at
 
-class ChunkedArray:
+class BlockchainTransactionManager:
     """
-    Memory-efficient array implementation that processes data in chunks.
+    Manager for optimized blockchain transactions.
     
-    This class enables processing large arrays that might not fit in memory all at once
-    by splitting operations across manageable chunks.
-    """
-    
-    def __init__(self, shape: Tuple[int, ...], dtype=np.float32, chunk_size: int = 10000000):
-        """
-        Initialize a chunked array.
-        
-        Args:
-            shape: Shape of the array
-            dtype: Data type for the array
-            chunk_size: Maximum elements per chunk (default 10M elements)
-        """
-        self.shape = shape
-        self.size = np.prod(shape)
-        self.dtype = dtype
-        self.chunk_size = min(chunk_size, self.size)  # Ensure chunk_size doesn't exceed total size
-        
-        # Calculate number of chunks
-        self.num_chunks = int(np.ceil(self.size / self.chunk_size))
-        
-        # Calculate chunk boundaries
-        self.chunk_boundaries = []
-        for i in range(self.num_chunks):
-            start = i * self.chunk_size
-            end = min((i + 1) * self.chunk_size, self.size)
-            self.chunk_boundaries.append((start, end))
-    
-    def apply_function(self, func: Callable, *arrays: np.ndarray) -> np.ndarray:
-        """
-        Apply a function to arrays in chunks.
-        
-        Args:
-            func: Function to apply (takes arrays as input and returns an array)
-            arrays: Input arrays
-            
-        Returns:
-            Result array
-        """
-        # Validate input arrays
-        for arr in arrays:
-            if arr.size != self.size:
-                raise ValueError(f"Array size mismatch: expected {self.size}, got {arr.size}")
-        
-        # Create output array
-        result = np.zeros(self.size, dtype=self.dtype)
-        
-        # Process in chunks
-        for start, end in self.chunk_boundaries:
-            # Extract chunks from input arrays
-            chunks = [arr.flat[start:end] for arr in arrays]
-            
-            # Apply function
-            result[start:end] = func(*chunks)
-            
-            # Explicitly free memory
-            del chunks
-            gc.collect()
-        
-        # Reshape result to match original shape
-        return result.reshape(self.shape)
-    
-    @staticmethod
-    def weighted_average(chunks: List[np.ndarray], weights: List[float]) -> np.ndarray:
-        """
-        Compute weighted average of arrays.
-        
-        Args:
-            chunks: List of array chunks
-            weights: List of weights
-            
-        Returns:
-            Weighted average
-        """
-        result = np.zeros_like(chunks[0])
-        for i, chunk in enumerate(chunks):
-            result += chunk * weights[i]
-        
-        return result
-
-class StreamingAggregator:
-    """
-    Memory-efficient streaming aggregator for large model parameters.
-    
-    This class enables aggregating large model updates using streaming operations
-    to avoid loading all data into memory at once, suitable for very large models.
+    Features:
+    - Transaction queue for prioritization
+    - Automatic nonce management
+    - Retry mechanism with backoff
+    - Gas price adjustment
+    - Transaction batching
     """
     
     def __init__(
-        self,
-        method: str = "fedavg",
-        memory_limit_mb: int = 4096,  # Default 4GB memory limit
-        use_gpu: bool = True,
-        auto_scaling: bool = True
+        self, 
+        web3: Web3, 
+        account: LocalAccount,
+        chain_id: int,
+        contracts: Dict[str, Any],
+        max_concurrent_txs: int = 5,
+        base_gas_price_multiplier: float = 1.1,
+        max_gas_price_multiplier: float = 2.0,
+        gas_price_bump_percent: int = 10,
+        confirmation_blocks: int = 2,
+        request_timeout: int = 120,
+        min_priority_fee: int = 1500000000  # 1.5 gwei
     ):
         """
-        Initialize the streaming aggregator.
+        Initialize the transaction manager.
         
         Args:
-            method: Aggregation method ("fedavg", "weighted_average", or "median")
-            memory_limit_mb: Memory limit in megabytes
-            use_gpu: Whether to use GPU for computations when available
-            auto_scaling: Automatically adjust chunk size based on available memory
+            web3: Web3 instance
+            account: Account to use for transactions
+            chain_id: Blockchain network chain ID
+            contracts: Dictionary of contract instances
+            max_concurrent_txs: Maximum number of concurrent transactions
+            base_gas_price_multiplier: Multiplier for base gas price
+            max_gas_price_multiplier: Maximum multiplier for gas price
+            gas_price_bump_percent: Percentage to bump gas price on retry
+            confirmation_blocks: Number of blocks to wait for confirmation
+            request_timeout: Timeout for transaction requests in seconds
+            min_priority_fee: Minimum priority fee in wei
         """
-        self.method = method
-        self.memory_limit_mb = memory_limit_mb
-        self.use_gpu = use_gpu and tf.config.list_physical_devices('GPU')
-        self.auto_scaling = auto_scaling
+        self.web3 = web3
+        self.account = account
+        self.chain_id = chain_id
+        self.contracts = contracts
+        self.max_concurrent_txs = max_concurrent_txs
+        self.base_gas_price_multiplier = base_gas_price_multiplier
+        self.max_gas_price_multiplier = max_gas_price_multiplier
+        self.gas_price_bump_percent = gas_price_bump_percent
+        self.confirmation_blocks = confirmation_blocks
+        self.request_timeout = request_timeout
+        self.min_priority_fee = min_priority_fee
         
-        # Calculate optimal chunk size based on memory limit
-        self.chunk_size = self._calculate_chunk_size()
+        # Transaction queue (priority queue)
+        self._tx_queue = []
+        
+        # Active transactions
+        self._active_txs = {}
+        
+        # Nonce management
+        self._last_used_nonce = -1
+        self._nonce_lock = threading.Lock()
+        self._nonce_cache = {}
+        
+        # Threading and event management
+        self._queue_lock = threading.Lock()
+        self._queue_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._worker_thread = None
+        
+        # Gas price tracker
+        self._current_gas_price = None
+        self._last_gas_price_update = 0
+        self._gas_price_update_interval = 60  # seconds
         
         # Performance metrics
-        self.metrics = {
-            "aggregation_times": [],
-            "memory_usage": [],
-            "processed_elements": 0,
-            "last_chunk_size": 0
+        self._tx_stats = {
+            "submitted": 0,
+            "confirmed": 0,
+            "failed": 0,
+            "retried": 0,
+            "avg_confirmation_time": 0,
+            "total_confirmation_time": 0
         }
     
-    def _calculate_chunk_size(self) -> int:
-        """
-        Calculate optimal chunk size based on memory constraints.
-        
-        Returns:
-            Chunk size (number of elements)
-        """
-        # Base chunk size calculation
-        # Each float32 is 4 bytes, we aim to use at most 1/4 of memory_limit for a chunk
-        bytes_per_element = 4  # float32
-        max_elements = (self.memory_limit_mb * 1024 * 1024) // (bytes_per_element * 4)
-        
-        # Start with a reasonable chunk size
-        chunk_size = min(max_elements, 10000000)  # 10M elements default max
-        
-        if self.auto_scaling:
-            # Adjust based on available system memory
-            available_memory = psutil.virtual_memory().available / (1024 * 1024)  # MB
-            scaling_factor = min(max(0.1, available_memory / self.memory_limit_mb), 2.0)
-            chunk_size = int(chunk_size * scaling_factor)
-        
-        logger.info(f"Calculated chunk size: {chunk_size} elements")
-        return chunk_size
+    def start(self):
+        """Start the transaction manager worker thread."""
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._stop_event.clear()
+            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker_thread.start()
+            logger.info("Transaction manager worker thread started")
     
-    def aggregate(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
+    def stop(self):
+        """Stop the transaction manager worker thread."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._stop_event.set()
+            self._queue_event.set()  # Wake up the worker
+            self._worker_thread.join(timeout=10)
+            logger.info("Transaction manager worker thread stopped")
+    
+    async def send_transaction(
+        self, 
+        contract_name: str, 
+        function_name: str, 
+        *args, 
+        priority: int = 1,
+        callback: Optional[Callable] = None,
+        **kwargs
+    ) -> str:
         """
-        Aggregate model updates using the specified method.
+        Send a transaction asynchronously.
         
         Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights (required for some methods)
+            contract_name: Name of the contract
+            function_name: Name of the function to call
+            *args: Positional arguments for the function
+            priority: Transaction priority (1 is highest)
+            callback: Optional callback function to call when transaction is confirmed
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Aggregated weights
+            Transaction hash
         """
-        start_time = time.time()
-        
-        if not contributions:
-            raise ValueError("No contributions to aggregate")
-        
-        # Select aggregation method
-        if self.method == "fedavg":
-            result = self._federated_averaging(contributions, global_weights)
-        elif self.method == "weighted_average":
-            result = self._weighted_averaging(contributions, global_weights)
-        elif self.method == "median":
-            result = self._median_aggregation(contributions, global_weights)
-        else:
-            raise ValueError(f"Unsupported aggregation method: {self.method}")
-        
-        # Record metrics
-        elapsed_time = time.time() - start_time
-        memory_usage = psutil.Process().memory_info().rss / (1024 * 1024)  # MB
-        
-        self.metrics["aggregation_times"].append(elapsed_time)
-        self.metrics["memory_usage"].append(memory_usage)
-        self.metrics["last_chunk_size"] = self.chunk_size
-        
-        # Log performance
-        logger.info(
-            f"Aggregation completed in {elapsed_time:.2f}s using {memory_usage:.1f}MB of memory. "
-            f"Processed {self.metrics['processed_elements']} elements across {len(contributions)} contributions."
+        # Create transaction request
+        tx_request = TransactionRequest(
+            contract_name=contract_name,
+            function_name=function_name,
+            args=args,
+            kwargs=kwargs,
+            priority=priority,
+            callback=callback
         )
         
-        return result
-    
-    def _federated_averaging(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
-        """
-        Perform federated averaging aggregation with streaming operations.
+        # Add to queue
+        with self._queue_lock:
+            heapq.heappush(self._tx_queue, tx_request)
         
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            
-        Returns:
-            Aggregated weights
-        """
-        if not global_weights:
-            raise ValueError("Global weights are required for federated averaging")
+        # Notify worker thread
+        self._queue_event.set()
         
-        # Extract updates and weights for aggregation
-        updates = [upd for upd, _ in contributions]
-        infos = [info for _, info in contributions]
+        # Create a future to wait for transaction submission
+        future = asyncio.Future()
         
-        # Calculate total weight
-        total_weight = sum(info.metrics.get('dataset_size', 1) for info in infos)
-        
-        # Calculate normalized weights
-        weights = [info.metrics.get('dataset_size', 1) / total_weight for info in infos]
-        
-        # Create result arrays with the same shape as global weights
-        result = [np.zeros_like(w) for w in global_weights]
-        
-        # Process each layer separately
-        for layer_idx, global_layer in enumerate(global_weights):
-            # Count elements for metrics
-            self.metrics["processed_elements"] += global_layer.size
-            
-            # For small layers, perform direct computation
-            if global_layer.size <= self.chunk_size:
-                # Convert updates to arrays for this layer
-                layer_updates = np.array([upd[layer_idx] for upd in updates])
-                
-                # Weighted average of updates
-                weighted_update = np.zeros_like(global_layer)
-                for i, update in enumerate(layer_updates):
-                    weighted_update += update * weights[i]
-                
-                # Add weighted update to global weights
-                result[layer_idx] = global_layer + weighted_update
+        # Wait for transaction to be submitted
+        # We use a custom callback that will be called when the tx is submitted
+        def on_submit(tx_hash, error=None):
+            if error:
+                future.set_exception(error)
             else:
-                # For large layers, use chunked processing
-                chunked_array = ChunkedArray(
-                    shape=global_layer.shape,
-                    dtype=global_layer.dtype,
-                    chunk_size=self.chunk_size
-                )
-                
-                # Process in chunks
-                flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-                
-                for start, end in chunked_array.chunk_boundaries:
-                    # Extract chunks from all updates
-                    update_chunks = []
-                    for upd in updates:
-                        update_chunks.append(upd[layer_idx].flat[start:end])
-                    
-                    # Calculate weighted average
-                    chunk_result = np.zeros_like(update_chunks[0])
-                    for i, chunk in enumerate(update_chunks):
-                        chunk_result += chunk * weights[i]
-                    
-                    # Add to global weights
-                    global_chunk = global_layer.flat[start:end]
-                    flat_result[start:end] = global_chunk + chunk_result
-                    
-                    # Free memory
-                    del update_chunks, chunk_result, global_chunk
-                    gc.collect()
-                
-                # Reshape result
-                result[layer_idx] = flat_result.reshape(global_layer.shape)
+                future.set_result(tx_hash)
         
-        return result
-    
-    def _weighted_averaging(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
-        """
-        Perform weighted averaging based on metrics like accuracy.
+        tx_request.on_submit = on_submit
         
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            
-        Returns:
-            Aggregated weights
-        """
-        if not global_weights:
-            raise ValueError("Global weights are required for weighted averaging")
-        
-        # Extract updates and infos
-        updates = [upd for upd, _ in contributions]
-        infos = [info for _, info in contributions]
-        
-        # Calculate weights based on accuracy
-        accuracies = [info.metrics.get('accuracy', 0.5) for info in infos]
-        total_accuracy = sum(accuracies)
-        
-        if total_accuracy == 0:
-            # If all accuracies are 0, use equal weights
-            weights = [1.0 / len(contributions)] * len(contributions)
-        else:
-            # Normalize weights by accuracy
-            weights = [acc / total_accuracy for acc in accuracies]
-        
-        # Create result list
-        result = [np.zeros_like(w) for w in global_weights]
-        
-        # Process each layer
-        for layer_idx, global_layer in enumerate(global_weights):
-            # Count elements for metrics
-            self.metrics["processed_elements"] += global_layer.size
-            
-            # For small layers, process directly
-            if global_layer.size <= self.chunk_size:
-                # Initialize with zeros
-                result[layer_idx] = np.zeros_like(global_layer)
-                
-                # Add weighted contribution from each client
-                for i, upd in enumerate(updates):
-                    # Add the update to the global weights to get the client's version
-                    client_weights = global_layer + upd[layer_idx]
-                    
-                    # Add weighted contribution
-                    result[layer_idx] += client_weights * weights[i]
-            else:
-                # For large layers, use chunked processing
-                chunked_array = ChunkedArray(
-                    shape=global_layer.shape,
-                    dtype=global_layer.dtype,
-                    chunk_size=self.chunk_size
-                )
-                
-                # Process in chunks
-                flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-                
-                for start, end in chunked_array.chunk_boundaries:
-                    # Extract global chunk
-                    global_chunk = global_layer.flat[start:end]
-                    
-                    # Initialize chunk result
-                    chunk_result = np.zeros_like(global_chunk)
-                    
-                    # Process each client's contribution
-                    for i, upd in enumerate(updates):
-                        # Get client chunk
-                        client_chunk = global_chunk + upd[layer_idx].flat[start:end]
-                        
-                        # Add weighted contribution
-                        chunk_result += client_chunk * weights[i]
-                    
-                    # Store result
-                    flat_result[start:end] = chunk_result
-                    
-                    # Free memory
-                    del global_chunk, chunk_result
-                    gc.collect()
-                
-                # Reshape result
-                result[layer_idx] = flat_result.reshape(global_layer.shape)
-        
-        return result
-    
-    def _median_aggregation(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
-        """
-        Perform median-based aggregation which is more robust to outliers.
-        
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            
-        Returns:
-            Aggregated weights
-        """
-        if not global_weights:
-            raise ValueError("Global weights are required for median aggregation")
-        
-        # Extract updates
-        updates = [upd for upd, _ in contributions]
-        
-        # Create result list
-        result = [np.zeros_like(w) for w in global_weights]
-        
-        # Process each layer
-        for layer_idx, global_layer in enumerate(global_weights):
-            # Count elements for metrics
-            self.metrics["processed_elements"] += global_layer.size
-            
-            # For small layers, process directly
-            if global_layer.size <= self.chunk_size:
-                # Collect all client weights for this layer
-                client_weights = []
-                for upd in updates:
-                    # Convert updates to weights
-                    client_w = global_layer + upd[layer_idx]
-                    client_weights.append(client_w)
-                
-                # Stack along a new axis for element-wise median
-                stacked = np.stack(client_weights, axis=0)
-                
-                # Compute median along client axis
-                result[layer_idx] = np.median(stacked, axis=0)
-            else:
-                # For large layers, use chunked processing
-                flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-                
-                # Process in chunks
-                chunk_size = self.chunk_size
-                num_chunks = int(np.ceil(global_layer.size / chunk_size))
-                
-                for chunk_idx in range(num_chunks):
-                    start = chunk_idx * chunk_size
-                    end = min((chunk_idx + 1) * chunk_size, global_layer.size)
-                    
-                    # Extract global chunk
-                    global_chunk = global_layer.flat[start:end]
-                    
-                    # Collect client chunks
-                    client_chunks = []
-                    for upd in updates:
-                        # Get update chunk
-                        update_chunk = upd[layer_idx].flat[start:end]
-                        
-                        # Convert to client weights
-                        client_chunk = global_chunk + update_chunk
-                        client_chunks.append(client_chunk)
-                    
-                    # Stack for element-wise median
-                    stacked_chunks = np.stack(client_chunks, axis=0)
-                    
-                    # Calculate median
-                    chunk_result = np.median(stacked_chunks, axis=0)
-                    
-                    # Store result
-                    flat_result[start:end] = chunk_result
-                    
-                    # Free memory
-                    del global_chunk, client_chunks, stacked_chunks, chunk_result
-                    gc.collect()
-                
-                # Reshape result
-                result[layer_idx] = flat_result.reshape(global_layer.shape)
-        
-        return result
-    
-    def parallel_aggregation(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: List[np.ndarray],
-        num_workers: int = None
-    ) -> List[np.ndarray]:
-        """
-        Perform aggregation with parallel processing for large models.
-        
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            num_workers: Number of worker threads/processes
-            
-        Returns:
-            Aggregated weights
-        """
-        if not num_workers:
-            # Default to number of available CPU cores minus 1 (leave one for system)
-            num_workers = max(1, psutil.cpu_count(logical=False) - 1)
-        
-        # Create result list
-        result = [None] * len(global_weights)
-        
-        # Group layers by size for efficient processing
-        small_layers = []  # Process together
-        large_layers = []  # Process individually
-        
-        for layer_idx, layer in enumerate(global_weights):
-            if layer.size <= self.chunk_size // 10:  # Very small layers
-                small_layers.append(layer_idx)
-            else:
-                large_layers.append(layer_idx)
-        
-        logger.info(f"Aggregating {len(small_layers)} small layers together and {len(large_layers)} large layers in parallel")
-        
-        # Create task queue
-        task_queue = queue.Queue()
-        result_dict = {}
-        
-        # Add tasks for large layers (one task per layer)
-        for layer_idx in large_layers:
-            task_queue.put(("single", layer_idx))
-        
-        # Add small layers as one batch task
-        if small_layers:
-            task_queue.put(("batch", small_layers))
-        
-        # Define worker function
-        def worker_func():
-            while True:
+        try:
+            # Wait for transaction to be submitted with timeout
+            tx_hash = await asyncio.wait_for(future, timeout=self.request_timeout)
+            return tx_hash
+        except asyncio.TimeoutError:
+            logger.error(f"Transaction submission timed out: {contract_name}.{function_name}")
+            # Remove from queue if it hasn't been processed yet
+            with self._queue_lock:
                 try:
-                    task_type, layer_data = task_queue.get(block=False)
+                    self._tx_queue.remove(tx_request)
+                except ValueError:
+                    pass  # Not in queue anymore
+            raise TimeoutError(f"Transaction submission timed out: {contract_name}.{function_name}")
+    
+    async def send_transaction_and_wait(
+        self, 
+        contract_name: str, 
+        function_name: str, 
+        *args, 
+        priority: int = 1,
+        **kwargs
+    ) -> Dict[str, Any]:
+        """
+        Send a transaction and wait for confirmation.
+        
+        Args:
+            contract_name: Name of the contract
+            function_name: Name of the function to call
+            *args: Positional arguments for the function
+            priority: Transaction priority (1 is highest)
+            **kwargs: Keyword arguments for the function
+            
+        Returns:
+            Transaction receipt
+        """
+        # Create future for the receipt
+        future = asyncio.Future()
+        
+        # Define callback
+        def on_complete(receipt, error=None):
+            if error:
+                future.set_exception(error)
+            else:
+                future.set_result(receipt)
+        
+        # Send transaction
+        tx_hash = await self.send_transaction(
+            contract_name,
+            function_name,
+            *args,
+            priority=priority,
+            callback=on_complete,
+            **kwargs
+        )
+        
+        # Wait for confirmation with timeout
+        try:
+            receipt = await asyncio.wait_for(future, timeout=self.request_timeout * 2)
+            return receipt
+        except asyncio.TimeoutError:
+            logger.error(f"Transaction confirmation timed out: {tx_hash}")
+            raise TimeoutError(f"Transaction confirmation timed out: {tx_hash}")
+    
+    async def call_function(
+        self, 
+        contract_name: str, 
+        function_name: str, 
+        *args, 
+        **kwargs
+    ) -> Any:
+        """
+        Call a read-only contract function.
+        
+        Args:
+            contract_name: Name of the contract
+            function_name: Name of the function to call
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
+            
+        Returns:
+            Function result
+        """
+        try:
+            # Get contract instance
+            contract = self.contracts.get(contract_name)
+            if not contract:
+                raise ValueError(f"Contract '{contract_name}' not found")
+            
+            # Get function
+            contract_function = getattr(contract.functions, function_name)
+            if not contract_function:
+                raise ValueError(f"Function '{function_name}' not found in contract '{contract_name}'")
+            
+            # Call function
+            result = contract_function(*args, **kwargs).call()
+            
+            return result
+        except Exception as e:
+            logger.error(f"Failed to call function: {e}")
+            raise
+    
+    def get_transaction_count(self) -> int:
+        """
+        Get the current transaction count (nonce) for the account.
+        
+        Returns:
+            Current nonce
+        """
+        # Check cache first if recent
+        current_time = time.time()
+        if self._nonce_cache.get('timestamp', 0) > current_time - 10:
+            return self._nonce_cache['nonce']
+        
+        # Get from blockchain with retries
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                nonce = self.web3.eth.get_transaction_count(self.account.address)
+                
+                # Update cache
+                self._nonce_cache = {
+                    'nonce': nonce,
+                    'timestamp': current_time
+                }
+                
+                return nonce
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    logger.error(f"Failed to get transaction count: {e}")
+                    raise
+                
+                # Exponential backoff
+                time.sleep(0.5 * (2 ** retry_count))
+    
+    def get_next_nonce(self) -> int:
+        """
+        Get the next available nonce for transactions.
+        
+        Returns:
+            Next available nonce
+        """
+        with self._nonce_lock:
+            # If we haven't initialized the nonce counter yet
+            if self._last_used_nonce < 0:
+                # Get current nonce from blockchain
+                blockchain_nonce = self.get_transaction_count()
+                self._last_used_nonce = blockchain_nonce - 1
+            
+            # Increment and return
+            self._last_used_nonce += 1
+            return self._last_used_nonce
+    
+    def get_gas_price(self, increase_percent: int = 0) -> int:
+        """
+        Get the current gas price with optional percentage increase.
+        
+        Args:
+            increase_percent: Percentage to increase the gas price by
+            
+        Returns:
+            Gas price in wei
+        """
+        current_time = time.time()
+        
+        # Update gas price if necessary
+        if (self._current_gas_price is None or
+                current_time - self._last_gas_price_update > self._gas_price_update_interval):
+            try:
+                # Get gas price from blockchain
+                if hasattr(self.web3.eth, 'gas_price'):
+                    base_gas_price = self.web3.eth.gas_price
+                else:
+                    # Fallback for older web3.py versions
+                    base_gas_price = self.web3.eth.gasPrice
+                
+                # Apply base multiplier
+                self._current_gas_price = int(base_gas_price * self.base_gas_price_multiplier)
+                self._last_gas_price_update = current_time
+                
+                logger.debug(f"Updated gas price: {self._current_gas_price} wei")
+            except Exception as e:
+                logger.warning(f"Failed to update gas price: {e}")
+                # Use previous price or fallback
+                if self._current_gas_price is None:
+                    self._current_gas_price = 50000000000  # 50 gwei fallback
+        
+        # Get current gas price with increase if specified
+        gas_price = self._current_gas_price
+        if increase_percent > 0:
+            gas_price = int(gas_price * (1 + (increase_percent / 100)))
+        
+        # Ensure gas price doesn't exceed maximum
+        max_gas_price = int(self._current_gas_price * self.max_gas_price_multiplier)
+        gas_price = min(gas_price, max_gas_price)
+        
+        return gas_price
+    
+    def prepare_eip1559_fee_params(self, base_fee_increase_percent: int = 0) -> Dict[str, int]:
+        """
+        Prepare EIP-1559 fee parameters (maxFeePerGas and maxPriorityFeePerGas).
+        
+        Args:
+            base_fee_increase_percent: Percentage to increase the base fee by
+            
+        Returns:
+            Dictionary with fee parameters
+        """
+        # Check if EIP-1559 is supported
+        if not hasattr(self.web3.eth, 'max_priority_fee'):
+            # Fall back to legacy gas price
+            return {"gasPrice": self.get_gas_price(base_fee_increase_percent)}
+        
+        try:
+            # Get the priority fee
+            priority_fee = max(self.web3.eth.max_priority_fee, self.min_priority_fee)
+            
+            # Get the latest block to calculate base fee
+            latest_block = self.web3.eth.get_block('latest')
+            base_fee_per_gas = latest_block.get('baseFeePerGas', 0)
+            
+            # Calculate max fee per gas with safety margin and increase if specified
+            increase_multiplier = 1 + (base_fee_increase_percent / 100)
+            max_fee_per_gas = int((base_fee_per_gas * 2 * increase_multiplier) + priority_fee)
+            
+            return {
+                "maxFeePerGas": max_fee_per_gas,
+                "maxPriorityFeePerGas": priority_fee
+            }
+        except Exception as e:
+            logger.warning(f"Failed to prepare EIP-1559 fee params: {e}")
+            # Fall back to legacy gas price
+            return {"gasPrice": self.get_gas_price(base_fee_increase_percent)}
+    
+    def _worker_loop(self):
+        """Main worker loop for processing transaction queue."""
+        logger.info("Transaction worker loop started")
+        
+        while not self._stop_event.is_set():
+            # Wait for queue event or stop event
+            self._queue_event.wait(timeout=1.0)
+            self._queue_event.clear()
+            
+            if self._stop_event.is_set():
+                break
+            
+            # Process queue
+            try:
+                self._process_queue()
+            except Exception as e:
+                logger.error(f"Error in transaction worker: {e}")
+                time.sleep(1.0)  # Prevent rapid cycling on persistent errors
+            
+            # Check confirmations for active transactions
+            try:
+                self._check_confirmations()
+            except Exception as e:
+                logger.error(f"Error checking confirmations: {e}")
+        
+        logger.info("Transaction worker loop stopped")
+    
+    def _process_queue(self):
+        """Process the transaction queue."""
+        # Count active transactions
+        active_count = len(self._active_txs)
+        if active_count >= self.max_concurrent_txs:
+            return  # At maximum concurrent transactions
+        
+        # Calculate how many transactions we can process
+        slots_available = self.max_concurrent_txs - active_count
+        
+        # Process up to available slots
+        for _ in range(slots_available):
+            with self._queue_lock:
+                if not self._tx_queue:
+                    break  # Queue is empty
+                
+                # Get highest priority transaction
+                tx_request = heapq.heappop(self._tx_queue)
+            
+            # Process the transaction
+            try:
+                tx_hash = self._submit_transaction(tx_request)
+                
+                if tx_hash:
+                    # Update request status
+                    tx_request.status = TransactionStatus.SUBMITTED
+                    tx_request.submitted_at = time.time()
+                    tx_request.tx_hash = tx_hash
                     
-                    if task_type == "single":
-                        # Process single large layer
-                        layer_idx = layer_data
-                        layer_result = self._aggregate_single_layer(
-                            layer_idx, contributions, global_weights
-                        )
-                        result_dict[layer_idx] = layer_result
-                    elif task_type == "batch":
-                        # Process batch of small layers
-                        layer_indices = layer_data
-                        for idx in layer_indices:
-                            layer_result = self._aggregate_single_layer(
-                                idx, contributions, global_weights
+                    # Add to active transactions
+                    self._active_txs[tx_hash] = tx_request
+                    
+                    # Call on_submit callback if exists
+                    if hasattr(tx_request, 'on_submit') and callable(tx_request.on_submit):
+                        tx_request.on_submit(tx_hash)
+                    
+                    # Update stats
+                    self._tx_stats["submitted"] += 1
+                else:
+                    # Failed to submit
+                    tx_request.attempts += 1
+                    if tx_request.attempts < tx_request.max_attempts:
+                        # Re-queue with lower priority
+                        tx_request.priority += 1
+                        with self._queue_lock:
+                            heapq.heappush(self._tx_queue, tx_request)
+                    else:
+                        # Max attempts reached
+                        logger.error(f"Max attempts reached for tx: {tx_request.contract_name}.{tx_request.function_name}")
+                        tx_request.status = TransactionStatus.FAILED
+                        tx_request.error = Exception("Max attempts reached")
+                        
+                        # Call on_submit callback with error if exists
+                        if hasattr(tx_request, 'on_submit') and callable(tx_request.on_submit):
+                            tx_request.on_submit(None, tx_request.error)
+                        
+                        # Call callback with error if exists
+                        if tx_request.callback:
+                            tx_request.callback(None, tx_request.error)
+                        
+                        # Update stats
+                        self._tx_stats["failed"] += 1
+            except Exception as e:
+                logger.error(f"Error processing transaction: {e}")
+                
+                # Update request
+                tx_request.attempts += 1
+                tx_request.error = e
+                
+                if tx_request.attempts < tx_request.max_attempts:
+                    # Re-queue with lower priority
+                    tx_request.priority += 1
+                    with self._queue_lock:
+                        heapq.heappush(self._tx_queue, tx_request)
+                        
+                    # Update stats
+                    self._tx_stats["retried"] += 1
+                else:
+                    # Max attempts reached
+                    tx_request.status = TransactionStatus.FAILED
+                    
+                    # Call on_submit callback with error if exists
+                    if hasattr(tx_request, 'on_submit') and callable(tx_request.on_submit):
+                        tx_request.on_submit(None, e)
+                    
+                    # Call callback with error if exists
+                    if tx_request.callback:
+                        tx_request.callback(None, e)
+                    
+                    # Update stats
+                    self._tx_stats["failed"] += 1
+    
+    def _submit_transaction(self, tx_request: TransactionRequest) -> Optional[str]:
+        """
+        Submit a transaction to the blockchain.
+        
+        Args:
+            tx_request: Transaction request to submit
+            
+        Returns:
+            Transaction hash if successful, None otherwise
+        """
+        try:
+            # Get contract instance
+            contract = self.contracts.get(tx_request.contract_name)
+            if not contract:
+                raise ValueError(f"Contract '{tx_request.contract_name}' not found")
+            
+            # Get function
+            contract_function = getattr(contract.functions, tx_request.function_name)
+            if not contract_function:
+                raise ValueError(f"Function '{tx_request.function_name}' not found in contract '{tx_request.contract_name}'")
+            
+            # Build function call
+            function_call = contract_function(*tx_request.args, **tx_request.kwargs)
+            
+            # Get nonce
+            nonce = self.get_next_nonce()
+            
+            # Get fee parameters based on network and retry count
+            if tx_request.attempts > 0:
+                # Increase gas price for retries
+                gas_increase = tx_request.attempts * self.gas_price_bump_percent
+                fee_params = self.prepare_eip1559_fee_params(gas_increase)
+            else:
+                fee_params = self.prepare_eip1559_fee_params()
+            
+            # Estimate gas (with buffer)
+            try:
+                gas_estimate = function_call.estimate_gas({
+                    'from': self.account.address,
+                    **fee_params
+                })
+                gas_limit = int(gas_estimate * 1.2)  # Add 20% buffer
+            except Exception as e:
+                logger.warning(f"Gas estimation failed: {e}. Using default gas limit.")
+                gas_limit = self.config.get('gas_limit', 3000000)
+            
+            # Build transaction
+            tx = function_call.build_transaction({
+                'from': self.account.address,
+                'gas': gas_limit,
+                'nonce': nonce,
+                'chainId': self.chain_id,
+                **fee_params
+            })
+            
+            # Sign transaction
+            signed_tx = self.web3.eth.account.sign_transaction(tx, private_key=self.account.key)
+            
+            # Send transaction
+            tx_hash = self.web3.eth.send_raw_transaction(signed_tx.rawTransaction)
+            hex_tx_hash = self.web3.to_hex(tx_hash)
+            
+            logger.info(f"Transaction sent: {hex_tx_hash}")
+            return hex_tx_hash
+            
+        except Exception as e:
+            logger.error(f"Failed to submit transaction: {e}")
+            return None
+    
+    def _check_confirmations(self):
+        """Check confirmations for active transactions."""
+        if not self._active_txs:
+            return
+        
+        current_time = time.time()
+        completed_txs = []
+        
+        for tx_hash, tx_request in self._active_txs.items():
+            try:
+                # Check if transaction is confirmed
+                try:
+                    receipt = self.web3.eth.get_transaction_receipt(tx_hash)
+                    
+                    if receipt:
+                        # Check if enough confirmations
+                        if self.web3.eth.block_number >= receipt.blockNumber + self.confirmation_blocks:
+                            # Transaction confirmed
+                            confirmation_time = current_time - tx_request.submitted_at
+                            
+                            # Update metrics
+                            self._tx_stats["confirmed"] += 1
+                            self._tx_stats["total_confirmation_time"] += confirmation_time
+                            self._tx_stats["avg_confirmation_time"] = (
+                                self._tx_stats["total_confirmation_time"] / self._tx_stats["confirmed"]
                             )
-                            result_dict[idx] = layer_result
-                    
-                    task_queue.task_done()
-                except queue.Empty:
-                    break
-                except Exception as e:
-                    logger.error(f"Error in worker thread: {e}")
-                    task_queue.task_done()
-        
-        # Start worker threads
-        threads = []
-        for _ in range(num_workers):
-            thread = threading.Thread(target=worker_func)
-            thread.daemon = True
-            thread.start()
-            threads.append(thread)
-        
-        # Wait for completion
-        task_queue.join()
-        
-        # Assemble results
-        for layer_idx in range(len(global_weights)):
-            result[layer_idx] = result_dict.get(layer_idx)
-        
-        # Ensure all layers were processed
-        for layer_idx, layer_result in enumerate(result):
-            if layer_result is None:
-                # Process any missing layers (shouldn't happen but just in case)
-                logger.warning(f"Layer {layer_idx} was not processed by workers, processing now")
-                result[layer_idx] = self._aggregate_single_layer(
-                    layer_idx, contributions, global_weights
-                )
-        
-        return result
-    
-    def _aggregate_single_layer(
-        self,
-        layer_idx: int,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: List[np.ndarray]
-    ) -> np.ndarray:
-        """
-        Aggregate a single layer based on the selected method.
-        
-        Args:
-            layer_idx: Index of the layer to aggregate
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            
-        Returns:
-            Aggregated layer weights
-        """
-        global_layer = global_weights[layer_idx]
-        
-        # Use appropriate aggregation method
-        if self.method == "fedavg":
-            # Extract updates and calculate weights
-            updates = [upd[layer_idx] for upd, _ in contributions]
-            infos = [info for _, info in contributions]
-            
-            # Calculate total weight
-            total_weight = sum(info.metrics.get('dataset_size', 1) for info in infos)
-            
-            # Calculate normalized weights
-            weights = [info.metrics.get('dataset_size', 1) / total_weight for info in infos]
-            
-            # Aggregate layer
-            if global_layer.size <= self.chunk_size:
-                weighted_update = np.zeros_like(global_layer)
-                for i, update in enumerate(updates):
-                    weighted_update += update * weights[i]
+                            
+                            # Check if transaction was successful
+                            if receipt.status == 1:
+                                # Success
+                                logger.info(f"Transaction confirmed: {tx_hash} (took {confirmation_time:.2f}s)")
+                                tx_request.status = TransactionStatus.CONFIRMED
+                                tx_request.result = receipt
+                                
+                                # Call callback if exists
+                                if tx_request.callback:
+                                    tx_request.callback(receipt)
+                            else:
+                                # Failed
+                                logger.warning(f"Transaction failed: {tx_hash}")
+                                tx_request.status = TransactionStatus.FAILED
+                                tx_request.error = Exception("Transaction failed (status=0)")
+                                
+                                # Call callback with error if exists
+                                if tx_request.callback:
+                                    tx_request.callback(None, tx_request.error)
+                            
+                            # Mark for removal
+                            completed_txs.append(tx_hash)
                 
-                return global_layer + weighted_update
-            else:
-                return self._chunked_layer_fedavg(
-                    global_layer, updates, weights
-                )
+                except TransactionNotFound:
+                    # Transaction not yet mined
+                    # If it's been too long, consider it dropped
+                    if current_time - tx_request.submitted_at > self.request_timeout:
+                        logger.warning(f"Transaction may be dropped: {tx_hash}")
+                        
+                        # Resubmit with higher gas price
+                        tx_request.attempts += 1
+                        tx_request.status = TransactionStatus.DROPPED
+                        
+                        if tx_request.attempts < tx_request.max_attempts:
+                            # Re-queue with higher priority
+                            logger.info(f"Re-queuing dropped transaction: {tx_hash}")
+                            tx_request.priority = 1  # Highest priority
+                            with self._queue_lock:
+                                heapq.heappush(self._tx_queue, tx_request)
+                                
+                            # Update stats
+                            self._tx_stats["retried"] += 1
+                        else:
+                            # Max attempts reached
+                            logger.error(f"Max attempts reached for dropped tx: {tx_hash}")
+                            tx_request.status = TransactionStatus.FAILED
+                            tx_request.error = Exception("Transaction dropped")
+                            
+                            # Call callback with error if exists
+                            if tx_request.callback:
+                                tx_request.callback(None, tx_request.error)
+                            
+                            # Update stats
+                            self._tx_stats["failed"] += 1
+                        
+                        # Mark for removal
+                        completed_txs.append(tx_hash)
+            
+            except Exception as e:
+                logger.error(f"Error checking transaction {tx_hash}: {e}")
         
-        elif self.method == "weighted_average":
-            # Similar to fedavg but with accuracy-based weights
-            # Extract updates and infos
-            updates = [upd[layer_idx] for upd, _ in contributions]
-            infos = [info for _, info in contributions]
-            
-            # Calculate weights based on accuracy
-            accuracies = [info.metrics.get('accuracy', 0.5) for info in infos]
-            total_accuracy = sum(accuracies)
-            
-            if total_accuracy == 0:
-                weights = [1.0 / len(contributions)] * len(contributions)
-            else:
-                weights = [acc / total_accuracy for acc in accuracies]
-            
-            return self._chunked_layer_weighted_avg(
-                global_layer, updates, weights
-            )
-        
-        elif self.method == "median":
-            # Extract updates
-            updates = [upd[layer_idx] for upd, _ in contributions]
-            
-            return self._chunked_layer_median(
-                global_layer, updates
-            )
-        
-        else:
-            raise ValueError(f"Unsupported aggregation method: {self.method}")
+        # Remove completed transactions
+        for tx_hash in completed_txs:
+            if tx_hash in self._active_txs:
+                del self._active_txs[tx_hash]
     
-    def _chunked_layer_fedavg(
-        self,
-        global_layer: np.ndarray,
-        updates: List[np.ndarray],
-        weights: List[float]
-    ) -> np.ndarray:
+    def get_queue_status(self) -> Dict[str, Any]:
         """
-        Apply federated averaging to a layer using chunked processing.
+        Get the current status of the transaction queue.
+        
+        Returns:
+            Dictionary with queue status
+        """
+        with self._queue_lock:
+            queue_size = len(self._tx_queue)
+        
+        active_size = len(self._active_txs)
+        
+        return {
+            "queue_size": queue_size,
+            "active_transactions": active_size,
+            "stats": self._tx_stats.copy()
+        }
+    
+    def batch_transactions(self, batch_size: int = 5) -> bool:
+        """
+        Attempt to batch multiple transactions into a single multicall.
+        
+        Note: This is an advanced feature and requires a multicall contract.
         
         Args:
-            global_layer: Global layer weights
-            updates: List of updates from clients
-            weights: List of client weights
+            batch_size: Maximum number of transactions to batch
             
         Returns:
-            Aggregated layer
+            True if batching was successful
         """
-        # Create chunked array processor
-        chunked_array = ChunkedArray(
-            shape=global_layer.shape,
-            dtype=global_layer.dtype,
-            chunk_size=self.chunk_size
-        )
-        
-        # Process in chunks
-        flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-        
-        for start, end in chunked_array.chunk_boundaries:
-            # Extract chunks from all updates
-            update_chunks = []
-            for upd in updates:
-                update_chunks.append(upd.flat[start:end])
-            
-            # Calculate weighted average
-            chunk_result = np.zeros_like(update_chunks[0])
-            for i, chunk in enumerate(update_chunks):
-                chunk_result += chunk * weights[i]
-            
-            # Add to global weights
-            global_chunk = global_layer.flat[start:end]
-            flat_result[start:end] = global_chunk + chunk_result
-            
-            # Free memory
-            del update_chunks, chunk_result, global_chunk
-            gc.collect()
-        
-        # Reshape result
-        return flat_result.reshape(global_layer.shape)
-    
-    def _chunked_layer_weighted_avg(
-        self,
-        global_layer: np.ndarray,
-        updates: List[np.ndarray],
-        weights: List[float]
-    ) -> np.ndarray:
-        """
-        Apply weighted averaging to a layer using chunked processing.
-        
-        Args:
-            global_layer: Global layer weights
-            updates: List of updates from clients
-            weights: List of client weights
-            
-        Returns:
-            Aggregated layer
-        """
-        # Create chunked array processor
-        chunked_array = ChunkedArray(
-            shape=global_layer.shape,
-            dtype=global_layer.dtype,
-            chunk_size=self.chunk_size
-        )
-        
-        # Process in chunks
-        flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-        
-        for start, end in chunked_array.chunk_boundaries:
-            # Extract global chunk
-            global_chunk = global_layer.flat[start:end]
-            
-            # Initialize chunk result
-            chunk_result = np.zeros_like(global_chunk)
-            
-            # Process each client's contribution
-            for i, upd in enumerate(updates):
-                # Get client chunk
-                client_chunk = global_chunk + upd.flat[start:end]
-                
-                # Add weighted contribution
-                chunk_result += client_chunk * weights[i]
-            
-            # Store result
-            flat_result[start:end] = chunk_result
-            
-            # Free memory
-            del global_chunk, chunk_result
-            gc.collect()
-        
-        # Reshape result
-        return flat_result.reshape(global_layer.shape)
-    
-    def _chunked_layer_median(
-        self,
-        global_layer: np.ndarray,
-        updates: List[np.ndarray]
-    ) -> np.ndarray:
-        """
-        Apply median aggregation to a layer using chunked processing.
-        
-        Args:
-            global_layer: Global layer weights
-            updates: List of updates from clients
-            
-        Returns:
-            Aggregated layer
-        """
-        # Create result array
-        flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-        
-        # Process in chunks
-        chunk_size = self.chunk_size
-        num_chunks = int(np.ceil(global_layer.size / chunk_size))
-        
-        for chunk_idx in range(num_chunks):
-            start = chunk_idx * chunk_size
-            end = min((chunk_idx + 1) * chunk_size, global_layer.size)
-            
-            # Extract global chunk
-            global_chunk = global_layer.flat[start:end]
-            
-            # Collect client chunks
-            client_chunks = []
-            for upd in updates:
-                # Get update chunk
-                update_chunk = upd.flat[start:end]
-                
-                # Convert to client weights
-                client_chunk = global_chunk + update_chunk
-                client_chunks.append(client_chunk)
-            
-            # Stack for element-wise median
-            stacked_chunks = np.stack(client_chunks, axis=0)
-            
-            # Calculate median
-            chunk_result = np.median(stacked_chunks, axis=0)
-            
-            # Store result
-            flat_result[start:end] = chunk_result
-            
-            # Free memory
-            del global_chunk, client_chunks, stacked_chunks, chunk_result
-            gc.collect()
-        
-        # Reshape result
-        return flat_result.reshape(global_layer.shape)
-    
-    def get_performance_metrics(self) -> Dict[str, Any]:
-        """
-        Get performance metrics for the aggregator.
-        
-        Returns:
-            Dictionary of performance metrics
-        """
-        metrics = self.metrics.copy()
-        
-        if self.metrics["aggregation_times"]:
-            metrics["avg_aggregation_time"] = sum(self.metrics["aggregation_times"]) / len(self.metrics["aggregation_times"])
-            metrics["max_aggregation_time"] = max(self.metrics["aggregation_times"])
-            metrics["min_aggregation_time"] = min(self.metrics["aggregation_times"])
-        
-        if self.metrics["memory_usage"]:
-            metrics["avg_memory_usage"] = sum(self.metrics["memory_usage"]) / len(self.metrics["memory_usage"])
-            metrics["max_memory_usage"] = max(self.metrics["memory_usage"])
-            metrics["min_memory_usage"] = min(self.metrics["memory_usage"])
-        
-        return metrics
+        # This is a placeholder for multicall implementation
+        # In a real implementation, this would use something like Gnosis MulticallV2
+        return False
 
 
 # Example usage
+async def example_usage():
+    # Set up Web3 provider
+    from web3 import Web3
+    web3 = Web3(Web3.HTTPProvider("http://localhost:8545"))
+    
+    # Set up account
+    from eth_account import Account
+    private_key = "0x" + "1" * 64  # Replace with actual private key
+    account = Account.from_key(private_key)
+    
+    # Load contract ABIs
+    import json
+    with open("ContributionLogging.json") as f:
+        contribution_abi = json.load(f)["abi"]
+    
+    # Create contract instances
+    contribution_contract = web3.eth.contract(
+        address="0x1234567890123456789012345678901234567890",
+        abi=contribution_abi
+    )
+    
+    # Create contract dict
+    contracts = {
+        "ContributionLogging": contribution_contract
+    }
+    
+    # Create transaction manager
+    tx_manager = BlockchainTransactionManager(
+        web3=web3,
+        account=account,
+        chain_id=1337,  # Local testnet
+        contracts=contracts
+    )
+    
+    # Start the transaction manager
+    tx_manager.start()
+    
+    try:
+        # Send a transaction
+        tx_hash = await tx_manager.send_transaction(
+            contract_name="ContributionLogging",
+            function_name="logContribution",
+            "contribution_123",
+            "client_123",
+            1,
+            '{"accuracy": 0.85}',
+            "0.1.0",
+            "0x123..."
+        )
+        
+        print(f"Transaction sent: {tx_hash}")
+        
+        # Wait for it to be mined
+        receipt = await web3.eth.wait_for_transaction_receipt(tx_hash)
+        print(f"Transaction mined: {receipt.blockNumber}")
+        
+        # Get queue status
+        status = tx_manager.get_queue_status()
+        print(f"Queue status: {status}")
+        
+    finally:
+        # Stop the transaction manager
+        tx_manager.stop()
+
 if __name__ == "__main__":
-    import tensorflow as tf
+    import asyncio
+    asyncio.run(example_usage()) priority
+    max_attempts: int = 3
+    attempts: int = 0
+    created_at: float = 0.0
+    submitted_at: float = 0.0
+    tx_hash: Optional[str] = None
+    status: TransactionStatus = TransactionStatus.QUEUED
+    callback: Optional[Callable] = None
+    result: Any = None
+    error: Optional[Exception] = None
     
-    # Create a sample model
-    model = tf.keras.Sequential([
-        tf.keras.layers.Dense(1024, activation='relu', input_shape=(784,)),
-        tf.keras.layers.Dense(512, activation='relu'),
-        tf.keras.layers.Dense(256, activation='relu'),
-        tf.keras.layers.Dense(10, activation='softmax')
-    ])
+    def __post_init__(self):
+        if self.created_at == 0.0:
+            self.created_at = time.time()
     
-    # Get model weights
-    global_weights = model.get_weights()
-    
-    # Create synthetic client updates
-    num_clients = 5
-    contributions = []
-    
-    for i in range(num_clients):
-        # Create random updates (small perturbations)
-        updates = [w * 0.01 * np.random.randn(*w.shape) for w in global_weights]
-        
-        # Create contribution info
-        info = ContributionInfo(
-            client_id=f"client_{i}",
-            metrics={
-                "accuracy": 0.7 + (0.05 * i),  # Increasing accuracy
-                "loss": 0.5 - (0.02 * i),      # Decreasing loss
-                "dataset_size": 1000 * (i + 1)  # Different dataset sizes
-            }
-        )
-        
-        contributions.append((updates, info))
-    
-    # Initialize aggregator with different methods
-    for method in ["fedavg", "weighted_average", "median"]:
-        print(f"\nTesting {method} aggregation method")
-        
-        aggregator = StreamingAggregator(
-            method=method,
-            memory_limit_mb=2048,  # 2GB
-            use_gpu=False,  # For testing, don't use GPU
-            auto_scaling=True
-        )
-        
-        # Time the aggregation
-        start_time = time.time()
-        
-        # Perform aggregation
-        aggregated_weights = aggregator.aggregate(contributions, global_weights)
-        
-        # Print performance stats
-        elapsed = time.time() - start_time
-        print(f"  Completed in {elapsed:.3f} seconds")
-        
-        # Verify shapes
-        print(f"  Output weight shapes match input: {all(aw.shape == gw.shape for aw, gw in zip(aggregated_weights, global_weights))}")
-        
-        # Print metrics
-        metrics = aggregator.get_performance_metrics()
-        print(f"  Processed {metrics['processed_elements']:,} parameters")
-        print(f"  Memory usage: {metrics['memory_usage'][-1]:.1f} MB")
-        print(f"  Chunk size: {metrics['last_chunk_size']:,} elements")
-    
-    # Test parallel aggregation with large model
-    print("\nTesting parallel aggregation with large model")
-    
-    # Create a larger model to test parallel aggregation
-    large_model = tf.keras.Sequential([
-        tf.keras.layers.Dense(2048, activation='relu', input_shape=(1024,)),
-        tf.keras.layers.Dense(1024, activation='relu'),
-        tf.keras.layers.Dense(1024, activation='relu'),
-        tf.keras.layers.Dense(512, activation='relu'),
-        tf.keras.layers.Dense(100, activation='softmax')
-    ])
-    
-    # Get large model weights
-    large_weights = large_model.get_weights()
-    
-    # Create synthetic client updates for large model
-    large_contributions = []
-    for i in range(3):  # Fewer clients to save memory
-        updates = [w * 0.01 * np.random.randn(*w.shape) for w in large_weights]
-        info = ContributionInfo(
-            client_id=f"client_{i}",
-            metrics={
-                "accuracy": 0.8 + (0.05 * i),
-                "loss": 0.3 - (0.05 * i),
-                "dataset_size": 2000 * (i + 1)
-            }
-        )
-        large_contributions.append((updates, info))
-    
-    # Initialize aggregator for parallel processing
-    parallel_aggregator = StreamingAggregator(
-        method="fedavg",
-        memory_limit_mb=4096,  # 4GB
-        auto_scaling=True
-    )
-    
-    # Time the standard aggregation
-    start_time = time.time()
-    aggregated_weights = parallel_aggregator.aggregate(large_contributions, large_weights)
-    standard_time = time.time() - start_time
-    
-    print(f"  Standard aggregation completed in {standard_time:.3f} seconds")
-    
-    # Time the parallel aggregation
-    start_time = time.time()
-    parallel_weights = parallel_aggregator.parallel_aggregation(
-        large_contributions, 
-        large_weights,
-        num_workers=4  # Use 4 worker threads
-    )
-    parallel_time = time.time() - start_time
-    
-    print(f"  Parallel aggregation completed in {parallel_time:.3f} seconds")
-    print(f"  Speedup: {standard_time / parallel_time:.2f}x")
-    
-    # Verify results are the same
-    is_equal = all(
-        np.allclose(aw, pw, rtol=1e-5, atol=1e-5)
-        for aw, pw in zip(aggregated_weights, parallel_weights)
-    )
-    print(f"  Results match: {is_equal}")
-    
-    # Memory usage comparison
-    metrics = parallel_aggregator.get_performance_metrics()
-    print(f"  Memory usage (standard): {metrics['memory_usage'][-2]:.1f} MB")
-    print(f"  Memory usage (parallel): {metrics['memory_usage'][-1]:.1f} MB")
-    
-    print("\nTesting different memory limits:")
-    for memory_mb in [1024, 2048, 4096, 8192]:
-        # Initialize aggregator with specific memory limit
-        memory_test_aggregator = StreamingAggregator(
-            method="fedavg",
-            memory_limit_mb=memory_mb,
-            auto_scaling=False  # Disable auto-scaling to test fixed memory limits
-        )
-        
-        # Perform aggregation
-        start_time = time.time()
-        memory_test_aggregator.aggregate(contributions, global_weights)
-        elapsed = time.time() - start_time
-        
-        # Get metrics
-        metrics = memory_test_aggregator.get_performance_metrics()
-        chunk_size = metrics["last_chunk_size"]
-        memory_usage = metrics["memory_usage"][-1]
-        
-        print(f"  Memory limit: {memory_mb} MB → Chunk size: {chunk_size:,} elements → "
-              f"Actual memory: {memory_usage:.1f} MB → Time: {elapsed:.3f}s")
-    
-    print("\nAll aggregation methods verified successfully!")
-"""
-Optimized Aggregation Algorithms for Large Models
+    # For priority queue comparison
+    def __lt__(self, other):
+        if self.priority != other.priority:
+            return self.priority < other.priority
+        return self.created_at < other.created_at
 
-This module provides efficient implementations of aggregation algorithms for federated learning
-with a focus on handling large neural network models with memory efficiency and performance.
-"""
-
-import numpy as np
-import tensorflow as tf
-import logging
-import time
-from typing import Dict, List, Any, Tuple, Optional, Union, Callable
-import concurrent.futures
-import threading
-import queue
-from dataclasses import dataclass
-import psutil
-import gc
-import math
-from collections import defaultdict
-
-logger = logging.getLogger(__name__)
-
-@dataclass
-class ContributionInfo:
-    """Information about a contribution for aggregation."""
-    client_id: str
-    metrics: Dict[str, Any]
-    weight: float = 1.0  # Relative weight for aggregation
-    
-    def __str__(self):
-        return f"ContributionInfo(client_id={self.client_id}, weight={self.weight})"
-
-class ChunkedArray:
+class BlockchainTransactionManager:
     """
-    Memory-efficient array implementation that processes data in chunks.
+    Manager for optimized blockchain transactions.
     
-    This class enables processing large arrays that might not fit in memory all at once
-    by splitting operations across manageable chunks.
-    """
-    
-    def __init__(self, shape: Tuple[int, ...], dtype=np.float32, chunk_size: int = 10000000):
-        """
-        Initialize a chunked array.
-        
-        Args:
-            shape: Shape of the array
-            dtype: Data type for the array
-            chunk_size: Maximum elements per chunk (default 10M elements)
-        """
-        self.shape = shape
-        self.size = np.prod(shape)
-        self.dtype = dtype
-        self.chunk_size = min(chunk_size, self.size)  # Ensure chunk_size doesn't exceed total size
-        
-        # Calculate number of chunks
-        self.num_chunks = int(np.ceil(self.size / self.chunk_size))
-        
-        # Calculate chunk boundaries
-        self.chunk_boundaries = []
-        for i in range(self.num_chunks):
-            start = i * self.chunk_size
-            end = min((i + 1) * self.chunk_size, self.size)
-            self.chunk_boundaries.append((start, end))
-    
-    def apply_function(self, func: Callable, *arrays: np.ndarray) -> np.ndarray:
-        """
-        Apply a function to arrays in chunks.
-        
-        Args:
-            func: Function to apply (takes arrays as input and returns an array)
-            arrays: Input arrays
-            
-        Returns:
-            Result array
-        """
-        # Validate input arrays
-        for arr in arrays:
-            if arr.size != self.size:
-                raise ValueError(f"Array size mismatch: expected {self.size}, got {arr.size}")
-        
-        # Create output array
-        result = np.zeros(self.size, dtype=self.dtype)
-        
-        # Process in chunks
-        for start, end in self.chunk_boundaries:
-            # Extract chunks from input arrays
-            chunks = [arr.flat[start:end] for arr in arrays]
-            
-            # Apply function
-            result[start:end] = func(*chunks)
-            
-            # Explicitly free memory
-            del chunks
-            gc.collect()
-        
-        # Reshape result to match original shape
-        return result.reshape(self.shape)
-    
-    @staticmethod
-    def weighted_average(chunks: List[np.ndarray], weights: List[float]) -> np.ndarray:
-        """
-        Compute weighted average of arrays.
-        
-        Args:
-            chunks: List of array chunks
-            weights: List of weights
-            
-        Returns:
-            Weighted average
-        """
-        result = np.zeros_like(chunks[0])
-        for i, chunk in enumerate(chunks):
-            result += chunk * weights[i]
-        
-        return result
-
-class StreamingAggregator:
-    """
-    Memory-efficient streaming aggregator for large model parameters.
-    
-    This class enables aggregating large model updates using streaming operations
-    to avoid loading all data into memory at once, suitable for very large models.
+    Features:
+    - Transaction queue for prioritization
+    - Automatic nonce management
+    - Retry mechanism with backoff
+    - Gas price adjustment
+    - Transaction batching
     """
     
     def __init__(
-        self,
-        method: str = "fedavg",
-        memory_limit_mb: int = 4096,  # Default 4GB memory limit
-        use_gpu: bool = True,
-        auto_scaling: bool = True
+        self, 
+        web3: Web3, 
+        account: LocalAccount,
+        chain_id: int,
+        contracts: Dict[str, Any],
+        max_concurrent_txs: int = 5,
+        base_gas_price_multiplier: float = 1.1,
+        max_gas_price_multiplier: float = 2.0,
+        gas_price_bump_percent: int = 10,
+        confirmation_blocks: int = 2,
+        request_timeout: int = 120,
+        min_priority_fee: int = 1500000000  # 1.5 gwei
     ):
         """
-        Initialize the streaming aggregator.
+        Initialize the transaction manager.
         
         Args:
-            method: Aggregation method ("fedavg", "weighted_average", or "median")
-            memory_limit_mb: Memory limit in megabytes
-            use_gpu: Whether to use GPU for computations when available
-            auto_scaling: Automatically adjust chunk size based on available memory
+            web3: Web3 instance
+            account: Account to use for transactions
+            chain_id: Blockchain network chain ID
+            contracts: Dictionary of contract instances
+            max_concurrent_txs: Maximum number of concurrent transactions
+            base_gas_price_multiplier: Multiplier for base gas price
+            max_gas_price_multiplier: Maximum multiplier for gas price
+            gas_price_bump_percent: Percentage to bump gas price on retry
+            confirmation_blocks: Number of blocks to wait for confirmation
+            request_timeout: Timeout for transaction requests in seconds
+            min_priority_fee: Minimum priority fee in wei
         """
-        self.method = method
-        self.memory_limit_mb = memory_limit_mb
-        self.use_gpu = use_gpu and tf.config.list_physical_devices('GPU')
-        self.auto_scaling = auto_scaling
+        self.web3 = web3
+        self.account = account
+        self.chain_id = chain_id
+        self.contracts = contracts
+        self.max_concurrent_txs = max_concurrent_txs
+        self.base_gas_price_multiplier = base_gas_price_multiplier
+        self.max_gas_price_multiplier = max_gas_price_multiplier
+        self.gas_price_bump_percent = gas_price_bump_percent
+        self.confirmation_blocks = confirmation_blocks
+        self.request_timeout = request_timeout
+        self.min_priority_fee = min_priority_fee
         
-        # Calculate optimal chunk size based on memory limit
-        self.chunk_size = self._calculate_chunk_size()
+        # Transaction queue (priority queue)
+        self._tx_queue = []
+        
+        # Active transactions
+        self._active_txs = {}
+        
+        # Nonce management
+        self._last_used_nonce = -1
+        self._nonce_lock = threading.Lock()
+        self._nonce_cache = {}
+        
+        # Threading and event management
+        self._queue_lock = threading.Lock()
+        self._queue_event = threading.Event()
+        self._stop_event = threading.Event()
+        self._worker_thread = None
+        
+        # Gas price tracker
+        self._current_gas_price = None
+        self._last_gas_price_update = 0
+        self._gas_price_update_interval = 60  # seconds
         
         # Performance metrics
-        self.metrics = {
-            "aggregation_times": [],
-            "memory_usage": [],
-            "processed_elements": 0,
-            "last_chunk_size": 0
+        self._tx_stats = {
+            "submitted": 0,
+            "confirmed": 0,
+            "failed": 0,
+            "retried": 0,
+            "avg_confirmation_time": 0,
+            "total_confirmation_time": 0
         }
     
-    def _calculate_chunk_size(self) -> int:
-        """
-        Calculate optimal chunk size based on memory constraints.
-        
-        Returns:
-            Chunk size (number of elements)
-        """
-        # Base chunk size calculation
-        # Each float32 is 4 bytes, we aim to use at most 1/4 of memory_limit for a chunk
-        bytes_per_element = 4  # float32
-        max_elements = (self.memory_limit_mb * 1024 * 1024) // (bytes_per_element * 4)
-        
-        # Start with a reasonable chunk size
-        chunk_size = min(max_elements, 10000000)  # 10M elements default max
-        
-        if self.auto_scaling:
-            # Adjust based on available system memory
-            available_memory = psutil.virtual_memory().available / (1024 * 1024)  # MB
-            scaling_factor = min(max(0.1, available_memory / self.memory_limit_mb), 2.0)
-            chunk_size = int(chunk_size * scaling_factor)
-        
-        logger.info(f"Calculated chunk size: {chunk_size} elements")
-        return chunk_size
+    def start(self):
+        """Start the transaction manager worker thread."""
+        if self._worker_thread is None or not self._worker_thread.is_alive():
+            self._stop_event.clear()
+            self._worker_thread = threading.Thread(target=self._worker_loop, daemon=True)
+            self._worker_thread.start()
+            logger.info("Transaction manager worker thread started")
     
-    def aggregate(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
+    def stop(self):
+        """Stop the transaction manager worker thread."""
+        if self._worker_thread and self._worker_thread.is_alive():
+            self._stop_event.set()
+            self._queue_event.set()  # Wake up the worker
+            self._worker_thread.join(timeout=10)
+            logger.info("Transaction manager worker thread stopped")
+    
+    async def send_transaction(
+        self, 
+        contract_name: str, 
+        function_name: str, 
+        *args, 
+        priority: int = 1,
+        callback: Optional[Callable] = None,
+        **kwargs
+    ) -> str:
         """
-        Aggregate model updates using the specified method.
+        Send a transaction asynchronously.
         
         Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights (required for some methods)
+            contract_name: Name of the contract
+            function_name: Name of the function to call
+            *args: Positional arguments for the function
+            priority: Transaction priority (1 is highest)
+            callback: Optional callback function to call when transaction is confirmed
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Aggregated weights
+            Transaction hash
         """
-        start_time = time.time()
-        
-        if not contributions:
-            raise ValueError("No contributions to aggregate")
-        
-        # Select aggregation method
-        if self.method == "fedavg":
-            result = self._federated_averaging(contributions, global_weights)
-        elif self.method == "weighted_average":
-            result = self._weighted_averaging(contributions, global_weights)
-        elif self.method == "median":
-            result = self._median_aggregation(contributions, global_weights)
-        else:
-            raise ValueError(f"Unsupported aggregation method: {self.method}")
-        
-        # Record metrics
-        elapsed_time = time.time() - start_time
-        memory_usage = psutil.Process().memory_info().rss / (1024 * 1024)  # MB
-        
-        self.metrics["aggregation_times"].append(elapsed_time)
-        self.metrics["memory_usage"].append(memory_usage)
-        self.metrics["last_chunk_size"] = self.chunk_size
-        
-        # Log performance
-        logger.info(
-            f"Aggregation completed in {elapsed_time:.2f}s using {memory_usage:.1f}MB of memory. "
-            f"Processed {self.metrics['processed_elements']} elements across {len(contributions)} contributions."
+        # Create transaction request
+        tx_request = TransactionRequest(
+            contract_name=contract_name,
+            function_name=function_name,
+            args=args,
+            kwargs=kwargs,
+            priority=priority,
+            callback=callback
         )
         
-        return result
-    
-    def _federated_averaging(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
-        """
-        Perform federated averaging aggregation with streaming operations.
+        # Add to queue
+        with self._queue_lock:
+            heapq.heappush(self._tx_queue, tx_request)
         
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            
-        Returns:
-            Aggregated weights
-        """
-        if not global_weights:
-            raise ValueError("Global weights are required for federated averaging")
+        # Notify worker thread
+        self._queue_event.set()
         
-        # Extract updates and weights for aggregation
-        updates = [upd for upd, _ in contributions]
-        infos = [info for _, info in contributions]
+        # Create a future to wait for transaction submission
+        future = asyncio.Future()
         
-        # Calculate total weight
-        total_weight = sum(info.metrics.get('dataset_size', 1) for info in infos)
-        
-        # Calculate normalized weights
-        weights = [info.metrics.get('dataset_size', 1) / total_weight for info in infos]
-        
-        # Create result arrays with the same shape as global weights
-        result = [np.zeros_like(w) for w in global_weights]
-        
-        # Process each layer separately
-        for layer_idx, global_layer in enumerate(global_weights):
-            # Count elements for metrics
-            self.metrics["processed_elements"] += global_layer.size
-            
-            # For small layers, perform direct computation
-            if global_layer.size <= self.chunk_size:
-                # Convert updates to arrays for this layer
-                layer_updates = np.array([upd[layer_idx] for upd in updates])
-                
-                # Weighted average of updates
-                weighted_update = np.zeros_like(global_layer)
-                for i, update in enumerate(layer_updates):
-                    weighted_update += update * weights[i]
-                
-                # Add weighted update to global weights
-                result[layer_idx] = global_layer + weighted_update
+        # Wait for transaction to be submitted
+        # We use a custom callback that will be called when the tx is submitted
+        def on_submit(tx_hash, error=None):
+            if error:
+                future.set_exception(error)
             else:
-                # For large layers, use chunked processing
-                chunked_array = ChunkedArray(
-                    shape=global_layer.shape,
-                    dtype=global_layer.dtype,
-                    chunk_size=self.chunk_size
-                )
-                
-                # Process in chunks
-                flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-                
-                for start, end in chunked_array.chunk_boundaries:
-                    # Extract chunks from all updates
-                    update_chunks = []
-                    for upd in updates:
-                        update_chunks.append(upd[layer_idx].flat[start:end])
-                    
-                    # Calculate weighted average
-                    chunk_result = np.zeros_like(update_chunks[0])
-                    for i, chunk in enumerate(update_chunks):
-                        chunk_result += chunk * weights[i]
-                    
-                    # Add to global weights
-                    global_chunk = global_layer.flat[start:end]
-                    flat_result[start:end] = global_chunk + chunk_result
-                    
-                    # Free memory
-                    del update_chunks, chunk_result, global_chunk
-                    gc.collect()
-                
-                # Reshape result
-                result[layer_idx] = flat_result.reshape(global_layer.shape)
+                future.set_result(tx_hash)
         
-        return result
-    
-    def _weighted_averaging(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
-        """
-        Perform weighted averaging based on metrics like accuracy.
+        tx_request.on_submit = on_submit
         
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            
-        Returns:
-            Aggregated weights
-        """
-        if not global_weights:
-            raise ValueError("Global weights are required for weighted averaging")
-        
-        # Extract updates and infos
-        updates = [upd for upd, _ in contributions]
-        infos = [info for _, info in contributions]
-        
-        # Calculate weights based on accuracy
-        accuracies = [info.metrics.get('accuracy', 0.5) for info in infos]
-        total_accuracy = sum(accuracies)
-        
-        if total_accuracy == 0:
-            # If all accuracies are 0, use equal weights
-            weights = [1.0 / len(contributions)] * len(contributions)
-        else:
-            # Normalize weights by accuracy
-            weights = [acc / total_accuracy for acc in accuracies]
-        
-        # Create result list
-        result = [np.zeros_like(w) for w in global_weights]
-        
-        # Process each layer
-        for layer_idx, global_layer in enumerate(global_weights):
-            # Count elements for metrics
-            self.metrics["processed_elements"] += global_layer.size
-            
-            # For small layers, process directly
-            if global_layer.size <= self.chunk_size:
-                # Initialize with zeros
-                result[layer_idx] = np.zeros_like(global_layer)
-                
-                # Add weighted contribution from each client
-                for i, upd in enumerate(updates):
-                    # Add the update to the global weights to get the client's version
-                    client_weights = global_layer + upd[layer_idx]
-                    
-                    # Add weighted contribution
-                    result[layer_idx] += client_weights * weights[i]
-            else:
-                # For large layers, use chunked processing
-                chunked_array = ChunkedArray(
-                    shape=global_layer.shape,
-                    dtype=global_layer.dtype,
-                    chunk_size=self.chunk_size
-                )
-                
-                # Process in chunks
-                flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-                
-                for start, end in chunked_array.chunk_boundaries:
-                    # Extract global chunk
-                    global_chunk = global_layer.flat[start:end]
-                    
-                    # Initialize chunk result
-                    chunk_result = np.zeros_like(global_chunk)
-                    
-                    # Process each client's contribution
-                    for i, upd in enumerate(updates):
-                        # Get client chunk
-                        client_chunk = global_chunk + upd[layer_idx].flat[start:end]
-                        
-                        # Add weighted contribution
-                        chunk_result += client_chunk * weights[i]
-                    
-                    # Store result
-                    flat_result[start:end] = chunk_result
-                    
-                    # Free memory
-                    del global_chunk, chunk_result
-                    gc.collect()
-                
-                # Reshape result
-                result[layer_idx] = flat_result.reshape(global_layer.shape)
-        
-        return result
-    
-    def _median_aggregation(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: Optional[List[np.ndarray]] = None
-    ) -> List[np.ndarray]:
-        """
-        Perform median-based aggregation which is more robust to outliers.
-        
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            
-        Returns:
-            Aggregated weights
-        """
-        if not global_weights:
-            raise ValueError("Global weights are required for median aggregation")
-        
-        # Extract updates
-        updates = [upd for upd, _ in contributions]
-        
-        # Create result list
-        result = [np.zeros_like(w) for w in global_weights]
-        
-        # Process each layer
-        for layer_idx, global_layer in enumerate(global_weights):
-            # Count elements for metrics
-            self.metrics["processed_elements"] += global_layer.size
-            
-            # For small layers, process directly
-            if global_layer.size <= self.chunk_size:
-                # Collect all client weights for this layer
-                client_weights = []
-                for upd in updates:
-                    # Convert updates to weights
-                    client_w = global_layer + upd[layer_idx]
-                    client_weights.append(client_w)
-                
-                # Stack along a new axis for element-wise median
-                stacked = np.stack(client_weights, axis=0)
-                
-                # Compute median along client axis
-                result[layer_idx] = np.median(stacked, axis=0)
-            else:
-                # For large layers, use chunked processing
-                flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-                
-                # Process in chunks
-                chunk_size = self.chunk_size
-                num_chunks = int(np.ceil(global_layer.size / chunk_size))
-                
-                for chunk_idx in range(num_chunks):
-                    start = chunk_idx * chunk_size
-                    end = min((chunk_idx + 1) * chunk_size, global_layer.size)
-                    
-                    # Extract global chunk
-                    global_chunk = global_layer.flat[start:end]
-                    
-                    # Collect client chunks
-                    client_chunks = []
-                    for upd in updates:
-                        # Get update chunk
-                        update_chunk = upd[layer_idx].flat[start:end]
-                        
-                        # Convert to client weights
-                        client_chunk = global_chunk + update_chunk
-                        client_chunks.append(client_chunk)
-                    
-                    # Stack for element-wise median
-                    stacked_chunks = np.stack(client_chunks, axis=0)
-                    
-                    # Calculate median
-                    chunk_result = np.median(stacked_chunks, axis=0)
-                    
-                    # Store result
-                    flat_result[start:end] = chunk_result
-                    
-                    # Free memory
-                    del global_chunk, client_chunks, stacked_chunks, chunk_result
-                    gc.collect()
-                
-                # Reshape result
-                result[layer_idx] = flat_result.reshape(global_layer.shape)
-        
-        return result
-    
-    def parallel_aggregation(
-        self,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: List[np.ndarray],
-        num_workers: int = None
-    ) -> List[np.ndarray]:
-        """
-        Perform aggregation with parallel processing for large models.
-        
-        Args:
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
-            num_workers: Number of worker threads/processes
-            
-        Returns:
-            Aggregated weights
-        """
-        if not num_workers:
-            # Default to number of available CPU cores minus 1 (leave one for system)
-            num_workers = max(1, psutil.cpu_count(logical=False) - 1)
-        
-        # Create result list
-        result = [None] * len(global_weights)
-        
-        # Group layers by size for efficient processing
-        small_layers = []  # Process together
-        large_layers = []  # Process individually
-        
-        for layer_idx, layer in enumerate(global_weights):
-            if layer.size <= self.chunk_size // 10:  # Very small layers
-                small_layers.append(layer_idx)
-            else:
-                large_layers.append(layer_idx)
-        
-        logger.info(f"Aggregating {len(small_layers)} small layers together and {len(large_layers)} large layers in parallel")
-        
-        # Create task queue
-        task_queue = queue.Queue()
-        result_dict = {}
-        
-        # Add tasks for large layers (one task per layer)
-        for layer_idx in large_layers:
-            task_queue.put(("single", layer_idx))
-        
-        # Add small layers as one batch task
-        if small_layers:
-            task_queue.put(("batch", small_layers))
-        
-        # Define worker function
-        def worker_func():
-            while True:
+        try:
+            # Wait for transaction to be submitted with timeout
+            tx_hash = await asyncio.wait_for(future, timeout=self.request_timeout)
+            return tx_hash
+        except asyncio.TimeoutError:
+            logger.error(f"Transaction submission timed out: {contract_name}.{function_name}")
+            # Remove from queue if it hasn't been processed yet
+            with self._queue_lock:
                 try:
-                    task_type, layer_data = task_queue.get(block=False)
-                    
-                    if task_type == "single":
-                        # Process single large layer
-                        layer_idx = layer_data
-                        layer_result = self._aggregate_single_layer(
-                            layer_idx, contributions, global_weights
-                        )
-                        result_dict[layer_idx] = layer_result
-                    elif task_type == "batch":
-                        # Process batch of small layers
-                        layer_indices = layer_data
-                        for idx in layer_indices:
-                            layer_result = self._aggregate_single_layer(
-                                idx, contributions, global_weights
-                            )
-                            result_dict[idx] = layer_result
-                    
-                    task_queue.task_done()
-                except queue.Empty:
-                    break
-                except Exception as e:
-                    logger.error(f"Error in worker thread: {e}")
-                    task_queue.task_done()
-        
-        # Start worker threads
-        threads = []
-        for _ in range(num_workers):
-            thread = threading.Thread(target=worker_func)
-            thread.daemon = True
-            thread.start()
-            threads.append(thread)
-        
-        # Wait for completion
-        task_queue.join()
-        
-        # Assemble results
-        for layer_idx in range(len(global_weights)):
-            result[layer_idx] = result_dict.get(layer_idx)
-        
-        # Ensure all layers were processed
-        for layer_idx, layer_result in enumerate(result):
-            if layer_result is None:
-                # Process any missing layers (shouldn't happen but just in case)
-                logger.warning(f"Layer {layer_idx} was not processed by workers, processing now")
-                result[layer_idx] = self._aggregate_single_layer(
-                    layer_idx, contributions, global_weights
-                )
-        
-        return result
+                    self._tx_queue.remove(tx_request)
+                except ValueError:
+                    pass  # Not in queue anymore
+            raise TimeoutError(f"Transaction submission timed out: {contract_name}.{function_name}")
     
-    def _aggregate_single_layer(
-        self,
-        layer_idx: int,
-        contributions: List[Tuple[List[np.ndarray], ContributionInfo]],
-        global_weights: List[np.ndarray]
-    ) -> np.ndarray:
+    async def send_transaction_and_wait(
+        self, 
+        contract_name: str, 
+        function_name: str, 
+        *args, 
+        priority: int = 1,
+        **kwargs
+    ) -> Dict[str, Any]:
         """
-        Aggregate a single layer based on the selected method.
+        Send a transaction and wait for confirmation.
         
         Args:
-            layer_idx: Index of the layer to aggregate
-            contributions: List of (model_update, contribution_info) tuples
-            global_weights: Current global weights
+            contract_name: Name of the contract
+            function_name: Name of the function to call
+            *args: Positional arguments for the function
+            priority: Transaction priority (1 is highest)
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Aggregated layer weights
+            Transaction receipt
         """
-        global_layer = global_weights[layer_idx]
+        # Create future for the receipt
+        future = asyncio.Future()
         
-        # Use appropriate aggregation method
-        if self.method == "fedavg":
-            # Extract updates and calculate weights
-            updates = [upd[layer_idx] for upd, _ in contributions]
-            infos = [info for _, info in contributions]
-            
-            # Calculate total weight
-            total_weight = sum(info.metrics.get('dataset_size', 1) for info in infos)
-            
-            # Calculate normalized weights
-            weights = [info.metrics.get('dataset_size', 1) / total_weight for info in infos]
-            
-            # Aggregate layer
-            if global_layer.size <= self.chunk_size:
-                weighted_update = np.zeros_like(global_layer)
-                for i, update in enumerate(updates):
-                    weighted_update += update * weights[i]
-                
-                return global_layer + weighted_update
+        # Define callback
+        def on_complete(receipt, error=None):
+            if error:
+                future.set_exception(error)
             else:
-                return self._chunked_layer_fedavg(
-                    global_layer, updates, weights
-                )
+                future.set_result(receipt)
         
-        elif self.method == "weighted_average":
-            # Similar to fedavg but with accuracy-based weights
-            # Extract updates and infos
-            updates = [upd[layer_idx] for upd, _ in contributions]
-            infos = [info for _, info in contributions]
-            
-            # Calculate weights based on accuracy
-            accuracies = [info.metrics.get('accuracy', 0.5) for info in infos]
-            total_accuracy = sum(accuracies)
-            
-            if total_accuracy == 0:
-                weights = [1.0 / len(contributions)] * len(contributions)
-            else:
-                weights = [acc / total_accuracy for acc in accuracies]
-            
-            return self._chunked_layer_weighted_avg(
-                global_layer, updates, weights
-            )
-        
-        elif self.method == "median":
-            # Extract updates
-            updates = [upd[layer_idx] for upd, _ in contributions]
-            
-            return self._chunked_layer_median(
-                global_layer, updates
-            )
-        
-        else:
-            raise ValueError(f"Unsupported aggregation method: {self.method}")
-    
-    def _chunked_layer_fedavg(
-        self,
-        global_layer: np.ndarray,
-        updates: List[np.ndarray],
-        weights: List[float]
-    ) -> np.ndarray:
-        """
-        Apply federated averaging to a layer using chunked processing.
-        
-        Args:
-            global_layer: Global layer weights
-            updates: List of updates from clients
-            weights: List of client weights
-            
-        Returns:
-            Aggregated layer
-        """
-        # Create chunked array processor
-        chunked_array = ChunkedArray(
-            shape=global_layer.shape,
-            dtype=global_layer.dtype,
-            chunk_size=self.chunk_size
+        # Send transaction
+        tx_hash = await self.send_transaction(
+            contract_name,
+            function_name,
+            *args,
+            priority=priority,
+            callback=on_complete,
+            **kwargs
         )
         
-        # Process in chunks
-        flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-        
-        for start, end in chunked_array.chunk_boundaries:
-            # Extract chunks from all updates
-            update_chunks = []
-            for upd in updates:
-                update_chunks.append(upd.flat[start:end])
-            
-            # Calculate weighted average
-            chunk_result = np.zeros_like(update_chunks[0])
-            for i, chunk in enumerate(update_chunks):
-                chunk_result += chunk * weights[i]
-            
-            # Add to global weights
-            global_chunk = global_layer.flat[start:end]
-            flat_result[start:end] = global_chunk + chunk_result
-            
-            # Free memory
-            del update_chunks, chunk_result, global_chunk
-            gc.collect()
-        
-        # Reshape result
-        return flat_result.reshape(global_layer.shape)
+        # Wait for confirmation with timeout
+        try:
+            receipt = await asyncio.wait_for(future, timeout=self.request_timeout * 2)
+            return receipt
+        except asyncio.TimeoutError:
+            logger.error(f"Transaction confirmation timed out: {tx_hash}")
+            raise TimeoutError(f"Transaction confirmation timed out: {tx_hash}")
     
-    def _chunked_layer_weighted_avg(
-        self,
-        global_layer: np.ndarray,
-        updates: List[np.ndarray],
-        weights: List[float]
-    ) -> np.ndarray:
+    async def call_function(
+        self, 
+        contract_name: str, 
+        function_name: str, 
+        *args, 
+        **kwargs
+    ) -> Any:
         """
-        Apply weighted averaging to a layer using chunked processing.
+        Call a read-only contract function.
         
         Args:
-            global_layer: Global layer weights
-            updates: List of updates from clients
-            weights: List of client weights
+            contract_name: Name of the contract
+            function_name: Name of the function to call
+            *args: Positional arguments for the function
+            **kwargs: Keyword arguments for the function
             
         Returns:
-            Aggregated layer
+            Function result
         """
-        # Create chunked array processor
-        chunked_array = ChunkedArray(
-            shape=global_layer.shape,
-            dtype=global_layer.dtype,
-            chunk_size=self.chunk_size
-        )
-        
-        # Process in chunks
-        flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
-        
-        for start, end in chunked_array.chunk_boundaries:
-            # Extract global chunk
-            global_chunk = global_layer.flat[start:end]
+        try:
+            # Get contract instance
+            contract = self.contracts.get(contract_name)
+            if not contract:
+                raise ValueError(f"Contract '{contract_name}' not found")
             
-            # Initialize chunk result
-            chunk_result = np.zeros_like(global_chunk)
+            # Get function
+            contract_function = getattr(contract.functions, function_name)
+            if not contract_function:
+                raise ValueError(f"Function '{function_name}' not found in contract '{contract_name}'")
             
-            # Process each client's contribution
-            for i, upd in enumerate(updates):
-                # Get client chunk
-                client_chunk = global_chunk + upd.flat[start:end]
-                
-                # Add weighted contribution
-                chunk_result += client_chunk * weights[i]
+            # Call function
+            result = contract_function(*args, **kwargs).call()
             
-            # Store result
-            flat_result[start:end] = chunk_result
-            
-            # Free memory
-            del global_chunk, chunk_result
-            gc.collect()
-        
-        # Reshape result
-        return flat_result.reshape(global_layer.shape)
+            return result
+        except Exception as e:
+            logger.error(f"Failed to call function: {e}")
+            raise
     
-    def _chunked_layer_median(
-        self,
-        global_layer: np.ndarray,
-        updates: List[np.ndarray]
-    ) -> np.ndarray:
+    def get_transaction_count(self) -> int:
         """
-        Apply median aggregation to a layer using chunked processing.
+        Get the current transaction count (nonce) for the account.
+        
+        Returns:
+            Current nonce
+        """
+        # Check cache first if recent
+        current_time = time.time()
+        if self._nonce_cache.get('timestamp', 0) > current_time - 10:
+            return self._nonce_cache['nonce']
+        
+        # Get from blockchain with retries
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
+            try:
+                nonce = self.web3.eth.get_transaction_count(self.account.address)
+                
+                # Update cache
+                self._nonce_cache = {
+                    'nonce': nonce,
+                    'timestamp': current_time
+                }
+                
+                return nonce
+            except Exception as e:
+                retry_count += 1
+                if retry_count >= max_retries:
+                    logger.error(f"Failed to get transaction count: {e}")
+                    raise
+                
+                # Exponential backoff
+                time.sleep(0.5 * (2 ** retry_count))
+    
+    def get_next_nonce(self) -> int:
+        """
+        Get the next available nonce for transactions.
+        
+        Returns:
+            Next available nonce
+        """
+        with self._nonce_lock:
+            # If we haven't initialized the nonce counter yet
+            if self._last_used_nonce < 0:
+                # Get current nonce from blockchain
+                blockchain_nonce = self.get_transaction_count()
+                self._last_used_nonce = blockchain_nonce - 1
+            
+            # Increment and return
+            self._last_used_nonce += 1
+            return self._last_used_nonce
+    
+    def get_gas_price(self, increase_percent: int = 0) -> int:
+        """
+        Get the current gas price with optional percentage increase.
         
         Args:
-            global_layer: Global layer weights
-            updates: List of updates from clients
+            increase_percent: Percentage to increase the gas price by
             
         Returns:
-            Aggregated layer
+            Gas price in wei
         """
-        # Create result array
-        flat_result = np.zeros(global_layer.size, dtype=global_layer.dtype)
+        current_time = time.time()
         
-        # Process in chunks
-        chunk_size = self.chunk_size
-        num_chunks = int(np.ceil(global_layer.size / chunk_size))
-        
-        for chunk_idx in range(num_chunks):
-            start = chunk_idx * chunk_size
-            end = min((chunk_idx + 1) * chunk_size, global_layer.size)
-            
-            # Extract global chunk
-            global_chunk = global_layer.flat[start:end]
-            
-            # Collect client chunks
-            client_chunks = []
-            for upd in updates:
-                # Get update chunk
-                update_chunk = upd.flat[start:end]
+        # Update gas price if necessary
+        if (self._current_gas_price is None or
+                current_time - self._last_gas_price_update > self._gas_price_update_interval):
+            try:
+                # Get gas price from blockchain
+                if hasattr(self.web3.eth, 'gas_price'):
+                    base_gas_price = self.web3.eth.gas_price
+                else:
+                    # Fallback for older web3.py versions
+                    base_gas_price = self.web3.eth.gasPrice
                 
-                # Convert to client weights
-                client_chunk = global_chunk + update_chunk
-                client_chunks.append(client_chunk)
-            
-            # Stack for element-wise median
-            stacked_chunks = np.stack(client_chunks, axis=0)
-            
-            # Calculate median
-            chunk_result = np.median(stacked_chunks, axis=0)
-            
-            # Store result
-            flat_result[start:end] = chunk_result
-            
-            # Free memory
-            del global_chunk, client_chunks, stacked_chunks, chunk_result
-            gc.collect()
+                # Apply base multiplier
+                self._current_gas_price = int(base_gas_price * self.base_gas_price_multiplier)
+                self._last_gas_price_update = current_time
+                
+                logger.debug(f"Updated gas price: {self._current_gas_price} wei")
+            except Exception as e:
+                logger.warning(f"Failed to update gas price: {e}")
+                # Use previous price or fallback
+                if self._current_gas_price is None:
+                    self._current_gas_price = 50000000000  # 50 gwei fallback
         
-        # Reshape result
-        return flat_result.reshape(global_layer.shape)
+        # Get current gas price with increase if specified
+        gas_price = self._current_gas_price
+        if increase_percent > 0:
+            gas_price = int(gas_price * (1 + (increase_percent / 100)))
+        
+        # Ensure gas price doesn't exceed maximum
+        max_gas_price = int(self._current_gas_price * self.max_gas_price_multiplier)
+        gas_price = min(gas_price, max_gas_price)
+        
+        return gas_price
     
-    def get_performance_metrics(self) -> Dict[str, Any]:
+    def prepare_eip1559_fee_params(self, base_fee_increase_percent: int = 0) -> Dict[str, int]:
         """
-        Get performance metrics for the aggregator.
+        Prepare EIP-1559 fee parameters (maxFeePerGas and maxPriorityFeePerGas).
         
+        Args:
+            base_fee_increase_percent: Percentage to increase the base fee by
+            
         Returns:
-            Dictionary of performance metrics
+            Dictionary with fee parameters
         """
-        metrics = self.metrics.copy()
+        # Check if EIP-1559 is supported
+        if not hasattr(self.web3.eth, 'max_priority_fee'):
+            # Fall back to legacy gas price
+            return {"gasPrice": self.get_gas_price(base_fee_increase_percent)}
         
-        if self.metrics["aggregation_times"]:
-            metrics["avg_aggregation_time"] = sum(self.metrics["aggregation_times"]) / len(self.metrics["aggregation_times"])
-            metrics["max_aggregation_time"] = max(self.metrics["aggregation_times"])
-            metrics["min_aggregation_time"] = min(self.metrics["aggregation_times"])
-        
-        if self.metrics["memory_usage"]:
-            metrics["avg_memory_usage"] = sum(self.metrics["memory_usage"]) / len(self.metrics["memory_usage"])
-            metrics["max_memory_usage"] = max(self.metrics["memory_usage"])
-            metrics["min_memory_usage"] = min(self.metrics["memory_usage"])
-        
-        return metrics
-
-
-# Example usage
-if __name__ == "__main__":
-    import tensorflow as tf
-    
-    # Create a sample model
-    model = tf.keras.Sequential([
-        tf.keras.layers.Dense(1024, activation='relu', input_shape=(784,)),
-        tf.keras.layers.Dense(512, activation='relu'),
-        tf.keras.layers.Dense(256, activation='relu'),
-        tf.keras.layers.Dense(10, activation='softmax')
-    ])
-    
-    # Get model weights
-    global_weights = model.get_weights()
-    
-    # Create synthetic client updates
-    num_clients = 5
-    contributions = []
-    
-    for i in range(num_clients):
-        # Create random updates (small perturbations)
-        updates = [w * 0.01 * np.random.randn(*w.shape) for w in global_weights]
-        
-        # Create contribution info
-        info = ContributionInfo(
-            client_id=f"client_{i}",
-            metrics={
-                "accuracy": 0.7 + (0.05 * i),  # Increasing accuracy
-                "loss": 0.5 - (0.02 * i),      # Decreasing loss
-                "dataset_size": 1000 * (i + 1)  # Different dataset sizes
+        try:
+            # Get the priority fee
+            priority_fee = max(self.web3.eth.max_priority_fee, self.min_priority_fee)
+            
+            # Get the latest block to calculate base fee
+            latest_block = self.web3.eth.get_block('latest')
+            base_fee_per_gas = latest_block.get('baseFeePerGas', 0)
+            
+            # Calculate max fee per gas with safety margin and increase if specified
+            increase_multiplier = 1 + (base_fee_increase_percent / 100)
+            max_fee_per_gas = int((base_fee_per_gas * 2 * increase_multiplier) + priority_fee)
+            
+            return {
+                "maxFeePerGas": max_fee_per_gas,
+                "maxPriorityFeePerGas": priority_fee
             }
-        )
-        
-        contributions.append((updates, info))
+        except Exception as e:
+            logger.warning(f"Failed to prepare EIP-1559 fee params: {e}")
+            # Fall back to legacy gas price
+            return {"gasPrice": self.get_gas_price(base_fee_increase_percent)}
     
-    # Initialize aggregator with different methods
-    for method in ["fedavg", "weighted_average", "median"]:
-        print(f"\nTesting {method} aggregation method")
+    def _worker_loop(self):
+        """Main worker loop for processing transaction queue."""
+        logger.info("Transaction worker loop started")
+        
+        while not self._stop_event.is_set():
+            # Wait for queue event or stop event
+            self._queue_event.wait(timeout=1.0)
+            self._queue_event.clear()
+            
+            if self._stop_event.is_set():
+                break
+            
+            # Process queue
+            try:
+                self._process_queue()
+            except Exception as e:
+                logger.error(f"Error in transaction worker: {e}")
+                time.sleep(1.0)  # Prevent rapid cycling on persistent errors
+            
+            # Check confirmations for active transactions
+            try:
+                self._check_confirmations()
+            except Exception as e:
+                logger.error(f"Error checking confirmations: {e}")
+        
+        logger.info("Transaction worker loop stopped")
+    
+    def _process_queue(self):
+        """Process the transaction queue."""
+        # Count active transactions
+        active_count = len(self._active_txs)
+        if active_count >= self.max_concurrent_txs:
+            return  # At maximum concurrent transactions
+        
+        # Calculate how many transactions we can process
+        slots_available = self.max_concurrent_txs - active_count
+        
+        # Process up to available slots
+        for _ in range(slots_available):
+            with self._queue_lock:
+                if not self._tx_queue:
+                    break  # Queue is empty
+                
+                # Get highest priority transaction
+                tx_request = heapq.heappop(self._tx_queue)
+            
+            # Process the transaction
+            try:
+                tx_hash = self._submit_transaction(tx_request)
+                
+                if tx_hash:
+                    # Update request status
+                    tx_request.status = TransactionStatus.SUBMITTED
+                    tx_request.submitted_at = time.time()
+                    tx_request.tx_hash = tx_hash
+                    
+                    # Add to active transactions
+                    self._active_txs[tx_hash] = tx_request
+                    
+                    # Call on_submit callback if exists
+                    if hasattr(tx_request, 'on_submit') and callable(tx_request.on_submit):
+                        tx_request.on_submit(tx_hash)
+                    
+                    # Update stats
+                    self._tx_stats["submitted"] += 1
+                else:
+                    # Failed to submit
+                    tx_request.attempts += 1
+                    if tx_request.attempts < tx_request.max_attempts:
+                        # Re-queue with lower priority
+                        tx_request.priority += 1
+                        with self._queue_lock:
+                            heapq.heappush(self._tx_queue, tx_request)
+                    else:
+                        # Max attempts reached
+                        logger.error(f"Max attempts reached for tx: {tx_request.contract_name}.{tx_request.function_name}")
+                        tx_request.status = TransactionStatus.FAILED
+                        tx_request.error = Exception("Max attempts reached")
+                        
+                        # Call on_submit callback with error if exists
+                        if hasattr(tx_request, 'on_submit') and callable(tx_request.on_submit):
+                            tx_request.on_submit(None, tx_request.error)
+                        
+                        # Call callback with error if exists
