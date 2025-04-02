@@ -10,6 +10,7 @@ A privacy-preserving AI training ecosystem powered by blockchain technology that
 - **Decentralized Governance**: Community-driven platform evolution via DAO
 - **Transparent Rewards**: Fair compensation based on contribution quality and impact
 - **Memory-Efficient Processing**: Optimized for large neural network models
+- **Interactive Dashboard**: Real-time monitoring of system performance and token economics
 
 ## System Architecture
 
@@ -20,6 +21,7 @@ The platform consists of five key layers:
 3. **Blockchain Layer**: Smart contracts for contribution tracking and rewards
 4. **Governance Module**: Decentralized decision-making
 5. **API/Middleware Layer**: Integration and orchestration services
+6. **Dashboard**: Real-time visualization of system metrics and performance
 
 ## Getting Started
 
@@ -34,8 +36,8 @@ The platform consists of five key layers:
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/your-org/decentralized-federated-learning.git
-   cd decentralized-federated-learning
+   git clone https://github.com/Az0202/AI-Crypto-Federated-Learning.git
+   cd AI-Crypto-Federated-Learning
    ```
 
 2. Create environment file:
@@ -54,7 +56,21 @@ The platform consists of five key layers:
    docker-compose logs -f
    ```
 
-5. Access the dashboard at http://localhost:8501
+5. Access services:
+   - Dashboard: http://localhost:8501
+   - API: http://localhost:8000
+   - Blockchain node: http://localhost:8545
+
+### Dashboard Features
+
+The dashboard provides a real-time view of:
+- Platform Overview: Active clients, total contributions, and current training round
+- Model Performance: Accuracy, loss, and other metrics over time
+- Contributions: Detailed view of client contributions
+- Token Economics: Reward distribution and token balances
+- Governance: Proposal viewing and voting (requires authentication)
+
+**Note**: To view your token balance, you need to authenticate by entering your JWT token in the dashboard sidebar.
 
 ### Client Setup
 
@@ -90,6 +106,20 @@ To participate as a training client:
    # Submit contribution
    result = await client.submit_contribution(model_update, metrics)
    ```
+
+## Docker Container Architecture
+
+The platform runs as a set of interconnected Docker containers:
+
+- **blockchain**: Local Ethereum node running Ganache for development
+- **contract-deployer**: Deploys smart contracts to the blockchain
+- **redis**: Handles caching and rate limiting
+- **postgres**: Persistent database storage
+- **api**: FastAPI server exposing the federated learning endpoints
+- **aggregator**: Service that processes and aggregates model updates
+- **dashboard**: Streamlit dashboard for monitoring and visualization
+
+The services are designed to work together, with proper health checks and dependencies to ensure orderly startup. Docker Compose manages the deployment and ensures services can communicate through the internal Docker network.
 
 ## Deployment Options
 
@@ -330,3 +360,78 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 For more information, visit our [documentation](docs/README.md) or contact the team at your-email@example.com.
+
+## Troubleshooting
+
+### Common Issues
+
+#### Dashboard Cannot Connect to API
+
+If you see "Connection error" or "No platform statistics available" in the dashboard:
+
+1. Verify that the API service is running:
+   ```bash
+   docker-compose ps api
+   ```
+
+2. Check API health endpoint:
+   ```bash
+   curl http://localhost:8000/api/health
+   ```
+
+3. Ensure the dashboard is using the correct API URL. In Docker environment, services communicate using service names (e.g., `http://api:8000`), not localhost.
+
+#### Token Balance Not Showing
+
+1. The token balance feature requires authentication. Enter a valid JWT token in the dashboard sidebar.
+2. If you're testing with an empty auth token, the dashboard will gracefully display "Login to view" instead of your balance.
+
+#### Smart Contract Deployment Issues
+
+1. Check if the blockchain container is healthy:
+   ```bash
+   docker-compose ps blockchain
+   ```
+
+2. Verify the deployer has enough ETH:
+   ```bash
+   docker-compose logs contract-deployer
+   ```
+
+3. If necessary, rebuild the contract-deployer:
+   ```bash
+   docker-compose build contract-deployer
+   docker-compose up -d contract-deployer
+   ```
+
+### Restarting Services
+
+To restart individual services after configuration changes:
+
+```bash
+docker-compose restart [service_name]
+```
+
+For example, to restart the dashboard after changes:
+
+```bash
+docker-compose restart dashboard
+```
+
+## Recent Updates
+
+### Dashboard Improvements (July 2024)
+
+- **Fixed API Connectivity**: Resolved communication issues between the dashboard and API containers in Docker environment
+- **Enhanced Error Handling**: Added better error reporting and graceful degradation when services are unavailable
+- **Improved Token Balance Display**: Dashboard now handles authentication gracefully, showing helpful messages when not authenticated
+- **Internal Service Communication**: Fixed Docker network service name resolution for stable inter-service communication
+- **Data Visualization**: Extended charts and visualizations for better platform monitoring
+- **Configuration Settings**: Added default settings suitable for Docker environment
+
+### Smart Contract Deployment Enhancements
+
+- **Deployment Reliability**: Added health checks to ensure blockchain service is ready before contract deployment
+- **Account Funding**: Updated account configuration to use Ganache's default accounts with sufficient ETH
+- **Dependency Management**: Improved container dependencies to ensure ordered service startup
+- **Contract ABIs**: Enhanced handling of contract ABIs for middleware integration
