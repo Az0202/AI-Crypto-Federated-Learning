@@ -1,0 +1,160 @@
+version: '3.8'
+
+services:
+  # Blockchain node (local Ethereum node for development)
+  blockchain:
+    image: trufflesuite/ganache-cli:latest
+    ports:
+      - "8545:8545"
+    command: >
+      --deterministic
+      --mnemonic "test test test test test test test test test test test junk"
+      --networkId 1337
+      --chainId 1337
+      --db /data
+      --accounts 10
+      --defaultBalanceEther 1000
+      --blockTime 2
+    volumes:
+      - blockchain_data:/data
+    networks:
+      - federated_network
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8545"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Contract deployment service
+  contract-deployer:
+    build:
+      context: ./blockchain
+      dockerfile: Dockerfile
+    depends_on:
+      blockchain:
+        condition: service_healthy
+    environment:
+      - BLOCKCHAIN_URL=http://blockchain:8545
+      - DEPLOYER_PRIVATE_KEY=0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d
+      - NETWORK_ID=1337
+    volumes:
+      - ./blockchain:/app
+      - ./middleware/contracts:/app/deployed
+    networks:
+      - federated_network
+    command: ["npm", "run", "deploy"]
+
+  # Redis for rate limiting and caching
+  redis:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - federated_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Database for persistent storage
+  postgres:
+    image: postgres:13-alpine
+    environment:
+      - POSTGRES_USER=fedlearn
+      - POSTGRES_PASSWORD=fedlearnpassword
+      - POSTGRES_DB=fedlearn
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./db/init:/docker-entrypoint-initdb.d
+    networks:
+      - federated_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fedlearn"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API/Middleware server
+  api:
+    build:
+      context: ./
+      dockerfile: ./middleware/Dockerfile
+    ports:
+      - "8000:8000"
+    depends_on:
+      blockchain:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      contract-deployer:
+        condition: service_completed_successfully
+    environment:
+      - DATABASE_URL=postgresql://fedlearn:fedlearnpassword@postgres:5432/fedlearn
+      - REDIS_URL=redis://redis:6379/0
+      - BLOCKCHAIN_URL=http://blockchain:8545
+      - API_SERVER_PRIVATE_KEY=${API_SERVER_PRIVATE_KEY}
+      - CHAIN_ID=1337
+      - JWT_SECRET=${JWT_SECRET}
+      - ENVIRONMENT=development
+    volumes:
+      - ./middleware:/app
+      - model_storage:/app/models
+    networks:
+      - federated_network
+    command: ["python", "-m", "uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+
+  # Global aggregator service
+  aggregator:
+    build:
+      context: ./
+      dockerfile: ./aggregator/Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      - API_URL=http://api:8000
+      - DATABASE_URL=postgresql://fedlearn:fedlearnpassword@postgres:5432/fedlearn
+      - AGGREGATOR_PRIVATE_KEY=${AGGREGATOR_PRIVATE_KEY}
+    volumes:
+      - ./aggregator:/app
+      - model_storage:/app/models
+    networks:
+      - federated_network
+    command: ["python", "-m", "aggregator.service"]
+
+  # Dashboard for visualization
+  dashboard:
+    build:
+      context: ./
+      dockerfile: ./visualization/Dockerfile
+    ports:
+      - "8501:8501"
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      - API_URL=http://api:8000
+      - STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+      - STREAMLIT_SERVER_HEADLESS=true
+    volumes:
+      - ./visualization:/app
+    networks:
+      - federated_network
+    command: ["streamlit", "run", "dashboard.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+networks:
+  federated_network:
+    driver: bridge
+
+volumes:
+  blockchain_data:
+  redis_data:
+  postgres_data:
+  model_storage:
