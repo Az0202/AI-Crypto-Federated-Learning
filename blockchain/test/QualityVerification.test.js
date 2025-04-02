@@ -1,88 +1,229 @@
 /**
- * @type import('hardhat/config').HardhatUserConfig
+ * Tests for QualityVerification contract
  */
-require("@nomiclabs/hardhat-waffle");
-require("@nomiclabs/hardhat-ethers");
-require("solidity-coverage");
-require("hardhat-gas-reporter");
-require("hardhat-contract-sizer");
+describe("QualityVerification Contract", function () {
+  let qualityVerification;
+  let contributionLogging;
+  let owner;
+  let verifier;
+  let contributor;
 
-module.exports = {
-  solidity: {
-    version: "0.8.17",
-    settings: {
-      optimizer: {
-        enabled: true,
-        runs: 200
-      }
-    }
-  },
-  networks: {
-    hardhat: {
-      chainId: 1337,
-      accounts: {
-        mnemonic: "test test test test test test test test test test test junk",
-        path: "m/44'/60'/0'/0",
-        initialIndex: 0,
-        count: 20
-      }
-    },
-    localhost: {
-      url: "http://127.0.0.1:8545",
-      chainId: 1337
-    },
-    // Add other networks as needed for deployment
-    testnet: {
-      url: process.env.TESTNET_RPC_URL || "",
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      chainId: 5 // Goerli testnet
-    },
-    mainnet: {
-      url: process.env.MAINNET_RPC_URL || "",
-      accounts: process.env.PRIVATE_KEY ? [process.env.PRIVATE_KEY] : [],
-      chainId: 1
-    }
-  },
-  paths: {
-    sources: "./contracts",
-    tests: "./test",
-    cache: "./cache",
-    artifacts: "./artifacts"
-  },
-  gasReporter: {
-    enabled: process.env.REPORT_GAS !== undefined,
-    currency: "USD",
-    coinmarketcap: process.env.COINMARKETCAP_API_KEY,
-    excludeContracts: [],
-    src: "./contracts"
-  },
-  contractSizer: {
-    alphaSort: true,
-    disambiguatePaths: false,
-    runOnCompile: true,
-    strict: true
-  },
-  mocha: {
-    timeout: 60000
-  },
-  // Solidity coverage configuration
-  coverage: {
-    provider: "hardhat",
-    // Files to exclude from coverage report
-    skipFiles: [
-      "mocks/",
-      "interfaces/"
-    ],
-    // Coverage threshold requirements
-    istanbulReporter: ['html', 'lcov', 'text', 'json'],
-    // Enforce coverage thresholds
-    coverageThreshold: {
-      global: {
-        statements: 90,
-        branches: 85,
-        functions: 90,
-        lines: 90
-      }
-    }
-  }
-};
+  beforeEach(async function () {
+    // Get signers
+    [owner, verifier, contributor] = await ethers.getSigners();
+
+    // First deploy a mock ContributionLogging contract
+    const MockContribLogging = await ethers.getContractFactory("ContributionLogging");
+    contributionLogging = await MockContribLogging.deploy(ethers.constants.AddressZero);
+    await contributionLogging.deployed();
+
+    // Deploy QualityVerification contract
+    const QualityVerification = await ethers.getContractFactory("QualityVerification");
+    qualityVerification = await QualityVerification.deploy(contributionLogging.address);
+    await qualityVerification.deployed();
+
+    // Grant VERIFIER_ROLE to the verifier account
+    const VERIFIER_ROLE = await qualityVerification.VERIFIER_ROLE();
+    await qualityVerification.grantVerifierRole(verifier.address);
+  });
+
+  describe("Deployment", function () {
+    it("Should set the right ContributionLogging contract", async function () {
+      expect(await qualityVerification.contributionLoggingContract()).to.equal(contributionLogging.address);
+    });
+
+    it("Should initialize quality thresholds correctly", async function () {
+      const thresholds = await qualityVerification.thresholds();
+      
+      expect(thresholds.minAccuracy).to.equal(600);      // 60.0%
+      expect(thresholds.maxLoss).to.equal(2000);         // 2.0
+      expect(thresholds.outlierDetection).to.equal(true);
+      expect(thresholds.similarityThreshold).to.equal(700); // 70.0%
+      expect(thresholds.minDatasetSize).to.equal(10);
+    });
+  });
+
+  describe("Quality Verification", function () {
+    const contributionId = "contrib_123";
+    const metrics = '{"accuracy": 850, "loss": 150, "similarity": 900, "dataset_size": 1000}';
+    const passed = true;
+    const reason = "All quality checks passed";
+
+    it("Should allow verifier to verify contributions", async function () {
+      await qualityVerification.connect(verifier).verifyContribution(
+        contributionId,
+        metrics,
+        passed,
+        reason
+      );
+      
+      const result = await qualityVerification.verificationResults(contributionId);
+      
+      expect(result.contributionId).to.equal(contributionId);
+      expect(result.verifier).to.equal(verifier.address);
+      expect(result.passed).to.equal(passed);
+      expect(result.reason).to.equal(reason);
+    });
+
+    it("Should emit ContributionVerified event", async function () {
+      await expect(
+        qualityVerification.connect(verifier).verifyContribution(
+          contributionId,
+          metrics,
+          passed,
+          reason
+        )
+      )
+        .to.emit(qualityVerification, "ContributionVerified")
+        .withArgs(contributionId, passed, reason, verifier.address);
+    });
+
+    it("Should store verification history", async function () {
+      // First verification
+      await qualityVerification.connect(verifier).verifyContribution(
+        contributionId,
+        metrics,
+        passed,
+        reason
+      );
+      
+      // Second verification (e.g., after review)
+      await qualityVerification.connect(verifier).verifyContribution(
+        contributionId,
+        metrics,
+        !passed, // opposite result
+        "Failed on second review"
+      );
+      
+      // Get verification history
+      const history = await qualityVerification.getVerificationHistory(contributionId);
+      
+      expect(history.length).to.equal(2);
+      expect(history[0].passed).to.equal(passed);
+      expect(history[1].passed).to.equal(!passed);
+    });
+
+    it("Should prevent non-verifiers from verifying", async function () {
+      await expect(
+        qualityVerification.connect(contributor).verifyContribution(
+          contributionId,
+          metrics,
+          passed,
+          reason
+        )
+      ).to.be.revertedWith(/AccessControl/);
+    });
+  });
+
+  describe("Quality Threshold Checking", function () {
+    it("Should pass when all metrics exceed thresholds", async function () {
+      const result = await qualityVerification.checkQualityThresholds(
+        700,  // accuracy (above 600 threshold)
+        1500, // loss (below 2000 threshold)
+        800,  // similarity (above 700 threshold)
+        20    // dataset size (above 10 threshold)
+      );
+      
+      expect(result.passed).to.equal(true);
+      expect(result.reason).to.equal("All quality checks passed");
+    });
+
+    it("Should fail when accuracy is below threshold", async function () {
+      const result = await qualityVerification.checkQualityThresholds(
+        500,  // accuracy (below 600 threshold)
+        1500, // loss
+        800,  // similarity
+        20    // dataset size
+      );
+      
+      expect(result.passed).to.equal(false);
+      expect(result.reason).to.equal("Accuracy below threshold");
+    });
+
+    it("Should fail when loss is above threshold", async function () {
+      const result = await qualityVerification.checkQualityThresholds(
+        700,  // accuracy
+        2500, // loss (above 2000 threshold)
+        800,  // similarity
+        20    // dataset size
+      );
+      
+      expect(result.passed).to.equal(false);
+      expect(result.reason).to.equal("Loss above threshold");
+    });
+
+    it("Should fail when dataset size is too small", async function () {
+      const result = await qualityVerification.checkQualityThresholds(
+        700,  // accuracy
+        1500, // loss
+        800,  // similarity
+        5     // dataset size (below 10 threshold)
+      );
+      
+      expect(result.passed).to.equal(false);
+      expect(result.reason).to.equal("Dataset size too small");
+    });
+
+    it("Should fail when similarity is below threshold", async function () {
+      const result = await qualityVerification.checkQualityThresholds(
+        700,  // accuracy
+        1500, // loss
+        600,  // similarity (below 700 threshold)
+        20    // dataset size
+      );
+      
+      expect(result.passed).to.equal(false);
+      expect(result.reason).to.equal("Model update is an outlier");
+    });
+  });
+
+  describe("Admin Functions", function () {
+    it("Should allow admin to update thresholds", async function () {
+      await qualityVerification.updateThresholds(
+        700,  // minAccuracy
+        1500, // maxLoss
+        true, // outlierDetection
+        800,  // similarityThreshold
+        15    // minDatasetSize
+      );
+      
+      const thresholds = await qualityVerification.thresholds();
+      
+      expect(thresholds.minAccuracy).to.equal(700);
+      expect(thresholds.maxLoss).to.equal(1500);
+      expect(thresholds.outlierDetection).to.equal(true);
+      expect(thresholds.similarityThreshold).to.equal(800);
+      expect(thresholds.minDatasetSize).to.equal(15);
+    });
+
+    it("Should emit ThresholdsUpdated event", async function () {
+      await expect(
+        qualityVerification.updateThresholds(
+          700,  // minAccuracy
+          1500, // maxLoss
+          true, // outlierDetection
+          800,  // similarityThreshold
+          15    // minDatasetSize
+        )
+      )
+        .to.emit(qualityVerification, "ThresholdsUpdated")
+        .withArgs(700, 1500, true, 800, 15);
+    });
+
+    it("Should allow admin to update ContributionLogging contract", async function () {
+      const newAddress = "0x1234567890123456789012345678901234567890";
+      
+      await qualityVerification.updateContributionLoggingContract(newAddress);
+      
+      expect(await qualityVerification.contributionLoggingContract()).to.equal(newAddress);
+    });
+
+    it("Should prevent non-admin from updating thresholds", async function () {
+      await expect(
+        qualityVerification.connect(contributor).updateThresholds(
+          700, 1500, true, 800, 15
+        )
+      ).to.be.revertedWith(/AccessControl/);
+    });
+  });
+});
