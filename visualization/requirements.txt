@@ -1,0 +1,11 @@
+streamlit
+plotly
+pandas
+numpy
+aiohttp
+requests
+python-dotenv
+pyjwt
+web3
+eth-account
+protobuf 

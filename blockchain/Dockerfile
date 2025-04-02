@@ -6,18 +6,16 @@ WORKDIR /app
 RUN apk add --no-cache git bash python3 make g++
 
 # Copy package files
-COPY blockchain/package*.json ./
+COPY package*.json ./
 
 # Install dependencies
 RUN npm install
 
 # Copy contract files
-COPY blockchain/contracts ./contracts
-COPY blockchain/migrations ./migrations
-COPY blockchain/scripts ./scripts
-COPY blockchain/test ./test
-COPY blockchain/truffle-config.js ./
-COPY blockchain/hardhat.config.js ./
+COPY contracts ./contracts
+COPY scripts ./scripts
+COPY test ./test
+COPY hardhat.config.js ./
 
 # Create directory for deployed contract information
 RUN mkdir -p deployed

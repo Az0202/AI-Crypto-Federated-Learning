@@ -1,0 +1,23 @@
+{
+  "network": "localhost",
+  "timestamp": "2025-04-02T22:34:04.041Z",
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "contracts": {
+    "FedLearningToken": {
+      "address": "0x0165878A594ca255338adfa4d48449f69242Eb8F",
+      "initialSupply": "10000000000000000000000000"
+    },
+    "ContributionLogging": {
+      "address": "0xa513E6E4b8f2a923D98304ec87F64353C4D5C853"
+    },
+    "QualityVerification": {
+      "address": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6"
+    },
+    "RewardDistribution": {
+      "address": "0x8A791620dd6260079BF849Dc5567aDC3F2FdC318"
+    },
+    "FLGovernance": {
+      "address": "0x610178dA211FEF7D417bC0e6FeD39F05609AD788"
+    }
+  }
+}

@@ -21,7 +21,7 @@ COPY aggregator/pyproject.toml aggregator/poetry.lock* /app/
 
 # Configure Poetry to not use virtual environments in Docker
 RUN poetry config virtualenvs.create false \
-    && poetry install --no-dev --no-interaction --no-ansi
+    && poetry install --without dev --no-interaction --no-ansi --no-root
 
 # Install TensorFlow and other ML dependencies
 RUN pip install --no-cache-dir tensorflow==2.10.0 tensorflow-privacy==0.8.0 psutil==5.9.0

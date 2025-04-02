@@ -4,6 +4,9 @@ const path = require('path');
 const hre = require('hardhat');
 const { ethers } = require('hardhat');
 
+// Helper function to sleep for specified milliseconds
+const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+
 async function main() {
   console.log('Starting deployment...');
 
@@ -61,32 +64,55 @@ async function main() {
 
   // Setup roles and permissions
   console.log('Setting up roles and permissions...');
-
-  // Grant AGGREGATOR_ROLE in ContributionLogging
-  const AGGREGATOR_ROLE = await contributionLogging.AGGREGATOR_ROLE();
-  await contributionLogging.grantRole(AGGREGATOR_ROLE, qualityVerification.address);
-  await contributionLogging.grantRole(AGGREGATOR_ROLE, rewardDistribution.address);
-  console.log('Granted AGGREGATOR_ROLE to QualityVerification and RewardDistribution');
-
-  // Grant VERIFIER_ROLE in QualityVerification
-  const VERIFIER_ROLE = await qualityVerification.VERIFIER_ROLE();
-  await qualityVerification.grantVerifierRole(deployer.address);
-  console.log('Granted VERIFIER_ROLE to deployer');
-
-  // Grant DISTRIBUTOR_ROLE in RewardDistribution
-  const DISTRIBUTOR_ROLE = await rewardDistribution.DISTRIBUTOR_ROLE();
-  await rewardDistribution.grantDistributorRole(deployer.address);
-  console.log('Granted DISTRIBUTOR_ROLE to deployer');
-
-  // Grant MINTER_ROLE in FedLearningToken to RewardDistribution
-  const MINTER_ROLE = await token.MINTER_ROLE();
-  await token.grantMinterRole(rewardDistribution.address);
-  console.log('Granted MINTER_ROLE to RewardDistribution');
-
-  // Transfer some tokens to the RewardDistribution contract
-  const transferAmount = ethers.utils.parseEther('1000000'); // 1 million tokens
-  await token.transfer(rewardDistribution.address, transferAmount);
-  console.log(`Transferred ${ethers.utils.formatEther(transferAmount)} tokens to RewardDistribution`);
+  
+  try {
+    // Grant AGGREGATOR_ROLE in ContributionLogging
+    const AGGREGATOR_ROLE = await contributionLogging.AGGREGATOR_ROLE();
+    const tx1 = await contributionLogging.grantRole(AGGREGATOR_ROLE, qualityVerification.address);
+    await tx1.wait();
+    console.log('Granted AGGREGATOR_ROLE to QualityVerification');
+    
+    await sleep(1000); // Wait 1 second between transactions
+    
+    const tx2 = await contributionLogging.grantRole(AGGREGATOR_ROLE, rewardDistribution.address);
+    await tx2.wait();
+    console.log('Granted AGGREGATOR_ROLE to RewardDistribution');
+    
+    await sleep(1000);
+    
+    // Grant VERIFIER_ROLE in QualityVerification
+    const VERIFIER_ROLE = await qualityVerification.VERIFIER_ROLE();
+    const tx3 = await qualityVerification.grantVerifierRole(deployer.address);
+    await tx3.wait();
+    console.log('Granted VERIFIER_ROLE to deployer');
+    
+    await sleep(1000);
+    
+    // Grant DISTRIBUTOR_ROLE in RewardDistribution
+    const DISTRIBUTOR_ROLE = await rewardDistribution.DISTRIBUTOR_ROLE();
+    const tx4 = await rewardDistribution.grantDistributorRole(deployer.address);
+    await tx4.wait();
+    console.log('Granted DISTRIBUTOR_ROLE to deployer');
+    
+    await sleep(1000);
+    
+    // Grant MINTER_ROLE in FedLearningToken to RewardDistribution
+    const MINTER_ROLE = await token.MINTER_ROLE();
+    const tx5 = await token.grantMinterRole(rewardDistribution.address);
+    await tx5.wait();
+    console.log('Granted MINTER_ROLE to RewardDistribution');
+    
+    await sleep(1000);
+    
+    // Transfer some tokens to the RewardDistribution contract
+    const transferAmount = ethers.utils.parseEther('1000000'); // 1 million tokens
+    const tx6 = await token.transfer(rewardDistribution.address, transferAmount);
+    await tx6.wait();
+    console.log(`Transferred ${ethers.utils.formatEther(transferAmount)} tokens to RewardDistribution`);
+  } catch (error) {
+    console.error('Error in setting up roles and permissions:', error);
+    // Continue with deployment anyway to save the deployed contract addresses
+  }
 
   // Save deployment information
   const deploymentInfo = {

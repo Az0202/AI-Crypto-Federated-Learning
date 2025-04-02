@@ -230,3 +230,4 @@ contract FedLearningToken is ERC20, ERC20Burnable, AccessControl {
             );
         }
     }
+}

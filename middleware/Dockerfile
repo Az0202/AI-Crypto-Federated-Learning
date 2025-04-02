@@ -20,7 +20,7 @@ COPY middleware/pyproject.toml middleware/poetry.lock* /app/
 
 # Configure Poetry to not use virtual environments in Docker
 RUN poetry config virtualenvs.create false \
-    && poetry install --no-dev --no-interaction --no-ansi
+    && poetry install --without dev --no-interaction --no-ansi --no-root
 
 # Copy application code
 COPY middleware /app/

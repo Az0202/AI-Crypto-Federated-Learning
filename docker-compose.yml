@@ -19,11 +19,6 @@ services:
       - blockchain_data:/data
     networks:
       - federated_network
-    healthcheck:
-      test: ["CMD", "nc", "-z", "localhost", "8545"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
 
   # Contract deployment service
   contract-deployer:
@@ -31,18 +26,16 @@ services:
       context: ./blockchain
       dockerfile: Dockerfile
     depends_on:
-      blockchain:
-        condition: service_healthy
+      - blockchain
     environment:
       - BLOCKCHAIN_URL=http://blockchain:8545
-      - DEPLOYER_PRIVATE_KEY=0x4f3edf983ac636a65a842ce7c78d9aa706d3b113bce9c46f30d7d21715b23b1d
+      - DEPLOYER_PRIVATE_KEY=0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
       - NETWORK_ID=1337
     volumes:
-      - ./blockchain:/app
       - ./middleware/contracts:/app/deployed
     networks:
       - federated_network
-    command: ["npm", "run", "deploy"]
+    command: ["sh", "-c", "sleep 10 && npm run deploy:local"]
 
   # Redis for rate limiting and caching
   redis:
@@ -87,14 +80,10 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      blockchain:
-        condition: service_healthy
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      contract-deployer:
-        condition: service_completed_successfully
+      - blockchain
+      - postgres
+      - redis
+      - contract-deployer
     environment:
       - DATABASE_URL=postgresql://fedlearn:fedlearnpassword@postgres:5432/fedlearn
       - REDIS_URL=redis://redis:6379/0
@@ -108,7 +97,7 @@ services:
       - model_storage:/app/models
     networks:
       - federated_network
-    command: ["python", "-m", "uvicorn", "api.server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    command: ["python", "-m", "uvicorn", "api.api_server:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
   # Global aggregator service
   aggregator:

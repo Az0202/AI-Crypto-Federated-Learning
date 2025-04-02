@@ -10,24 +10,17 @@ RUN apt-get update && apt-get install -y \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Poetry for dependency management
-RUN curl -sSL https://install.python-poetry.org | python3 -
-ENV PATH="$PATH:/root/.local/bin"
-
-# Copy Poetry configuration
-COPY visualization/pyproject.toml visualization/poetry.lock* /app/
-
-# Configure Poetry to not use virtual environments in Docker
-RUN poetry config virtualenvs.create false \
-    && poetry install --no-dev --no-interaction --no-ansi
-
-# Install Streamlit and visualization dependencies
+# Install dependencies directly with pip
 RUN pip install --no-cache-dir \
     streamlit==1.20.0 \
     plotly==5.13.0 \
     pandas==1.5.3 \
     numpy==1.23.5 \
-    aiohttp==3.8.4
+    aiohttp==3.8.4 \
+    requests \
+    python-dotenv \
+    pydantic \
+    web3
 
 # Copy application code
 COPY visualization /app/

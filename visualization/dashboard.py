@@ -28,21 +28,25 @@ st.set_page_config(
 )
 
 # Global variables
-API_URL = None
+API_URL = "http://api:8000"  # Default to Docker service name
 AUTH_TOKEN = None
 
 # Helper functions
 async def fetch_data(session, endpoint, headers=None):
     """Fetch data from API endpoint"""
+    url = f"{API_URL}/api/{endpoint}"
     try:
-        async with session.get(f"{API_URL}/api/{endpoint}", headers=headers) as response:
+        # Explicitly disable SSL verification for Docker internal communication
+        async with session.get(url, headers=headers, ssl=False, timeout=5) as response:
             if response.status == 200:
                 return await response.json()
             else:
-                st.error(f"Error fetching data from {endpoint}: {response.status}")
+                # Don't show error for every failed endpoint - we'll use mock data
+                st.error(f"Error fetching {endpoint}: Status {response.status}")
                 return None
     except Exception as e:
-        st.error(f"Exception fetching data from {endpoint}: {str(e)}")
+        # Don't show error for connection issues - we'll use mock data
+        st.error(f"Connection error: {str(e)}")
         return None
 
 async def fetch_all_data():
@@ -50,17 +54,23 @@ async def fetch_all_data():
     headers = {"Authorization": f"Bearer {AUTH_TOKEN}"} if AUTH_TOKEN else None
     
     async with aiohttp.ClientSession() as session:
-        tasks = [
-            fetch_data(session, "stats"),
-            fetch_data(session, "token/balance", headers),
-            # Mock data for endpoints not implemented in our API example
-            # In a real implementation, these would be actual API calls
+        # Always fetch stats
+        stats_task = fetch_data(session, "stats")
+        
+        # Only fetch token balance if we have an auth token
+        token_balance_task = fetch_data(session, "token/balance", headers) if AUTH_TOKEN else None
+        
+        # Mock data tasks
+        mock_tasks = [
             mock_fetch_contributions(),
             mock_fetch_model_performance(),
             mock_fetch_governance_proposals()
         ]
         
-        stats, token_balance, contributions, model_performance, governance = await asyncio.gather(*tasks)
+        # Execute tasks
+        stats = await stats_task
+        token_balance = await token_balance_task if token_balance_task else None
+        contributions, model_performance, governance = await asyncio.gather(*mock_tasks)
         
         return {
             "stats": stats,
@@ -128,11 +138,14 @@ async def mock_fetch_governance_proposals():
             if status == "Passed" and i > 1:
                 status = "Executed"
         
+        # Generate a random ethereum-like address
+        addr = "".join([np.random.choice(list("0123456789abcdef")) for _ in range(40)])
+        
         proposals.append({
             "proposal_id": i + 1,
             "title": f"Proposal {i + 1}",
             "description": f"Description for proposal {i + 1}",
-            "proposer": f"0x{np.random.randint(0, 16**40):040x}",
+            "proposer": f"0x{addr}",
             "created_at": timestamp,
             "voting_ends_at": voting_ends_at,
             "status": status,
@@ -157,7 +170,7 @@ def render_sidebar():
     
     global API_URL, AUTH_TOKEN
     
-    API_URL = st.sidebar.text_input("API URL", value="http://localhost:8000")
+    API_URL = st.sidebar.text_input("API URL", value="http://api:8000")
     
     st.sidebar.subheader("Authentication")
     AUTH_TOKEN = st.sidebar.text_input("Authentication Token", type="password")
@@ -393,7 +406,6 @@ def render_contributions(data):
                 'formatted_reward': 'Reward (Tokens)'
             }
         ),
-        hide_index=True,
         use_container_width=True
     )
 
@@ -413,9 +425,13 @@ def render_token_economics(data):
             st.metric("Your Token Balance", format_token_amount(token_balance.get('balance', '0')))
         else:
             st.metric("Your Token Balance", "Login to view")
+            st.info("Enter your authentication token in the sidebar to view your token balance")
     
     with col2:
-        rewards_issued = stats.get('total_rewards_issued', '0')
+        # Handle the case when stats is None
+        rewards_issued = '0'
+        if stats is not None:
+            rewards_issued = stats.get('total_rewards_issued', '0')
         st.metric("Total Rewards Issued", format_token_amount(rewards_issued))
     
     with col3:

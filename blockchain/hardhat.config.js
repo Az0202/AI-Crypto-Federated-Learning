@@ -7,7 +7,7 @@ require('hardhat-contract-sizer');
 require('dotenv').config();
 
 // Private keys for deployment
-const DEPLOYER_PRIVATE_KEY = process.env.DEPLOYER_PRIVATE_KEY || '0x0000000000000000000000000000000000000000000000000000000000000000';
+const DEPLOYER_PRIVATE_KEY = process.env.DEPLOYER_PRIVATE_KEY || '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'; // First account from Ganache
 const TESTNET_PRIVATE_KEY = process.env.TESTNET_PRIVATE_KEY || DEPLOYER_PRIVATE_KEY;
 const MAINNET_PRIVATE_KEY = process.env.MAINNET_PRIVATE_KEY || DEPLOYER_PRIVATE_KEY;
 
