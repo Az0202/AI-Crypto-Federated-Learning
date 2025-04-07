@@ -73,7 +73,7 @@ global_aggregator = GlobalAggregator()
 blockchain_middleware = BlockchainMiddleware()
 
 # JWT settings
-JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "temp_secret_key_replace_in_production")
+JWT_SECRET_KEY = os.getenv("JWT_SECRET_KEY", "DO_NOT_USE_THIS_VALUE_IN_PRODUCTION")
 JWT_ALGORITHM = "HS256"
 JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24  # 1 day
 

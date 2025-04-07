@@ -778,7 +778,7 @@ async def example_usage():
     
     # Set up account
     from eth_account import Account
-    private_key = "0x" + "1" * 64  # Replace with actual private key
+    private_key = "YOUR_PRIVATE_KEY_HERE"  # Never hardcode private keys in production
     account = Account.from_key(private_key)
     
     # Load contract ABIs
