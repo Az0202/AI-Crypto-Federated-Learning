@@ -43,7 +43,9 @@ The platform consists of five key layers:
 2. Create environment file:
    ```bash
    cp .env.template .env
-   # Edit .env with your configuration
+   # Edit .env with your secure configuration
+   # IMPORTANT: Generate new private keys and strong passwords
+   # NEVER commit this .env file to version control
    ```
 
 3. Start the platform:
