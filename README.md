@@ -221,6 +221,7 @@ decentralized-federated-learning/
 ├── .env.template                       # Environment variables template
 ├── docker-compose.yml                  # Main Docker Compose configuration
 ├── README.md                           # Project documentation
+├── blockchain_config.json              # Blockchain configuration
 │
 ├── client/                             # Client/Edge Layer
 │   ├── local_trainer.py                # Local model training module
@@ -262,25 +263,23 @@ decentralized-federated-learning/
 ├── middleware/                         # API/Middleware Layer
 │   ├── Dockerfile                      # Middleware container definition
 │   ├── pyproject.toml                  # Poetry dependencies for middleware
-│   ├── poetry.lock                     # Poetry lock file
 │   ├── api/                            # API endpoints
-│   │   ├── server.py                   # Main FastAPI application
-│   │   ├── routes.py                   # API route definitions
-│   │   └── validators.py               # Request validation
+│   │   └── api_server.py               # Main FastAPI application
 │   ├── auth/                           # Authentication
 │   │   └── signature_verifier.py       # Ethereum signature verification
 │   ├── blockchain/                     # Blockchain integration
 │   │   ├── blockchain_middleware.py    # Blockchain interaction
 │   │   └── transaction_manager.py      # Transaction management
-│   ├── security/                       # Security features
-│   │   └── rate_limiter.py             # Rate limiting middleware
-│   ├── orchestration.py                # Service orchestration
-│   └── monitoring.py                   # System monitoring
+│   ├── contracts/                      # Contract integration modules
+│   ├── models/                         # Data models
+│   └── security/                       # Security features
+│       └── rate_limiter.py             # Rate limiting middleware
 │
 ├── visualization/                      # Dashboard
 │   ├── Dockerfile                      # Dashboard container definition
 │   ├── pyproject.toml                  # Poetry dependencies for dashboard
 │   ├── poetry.lock                     # Poetry lock file
+│   ├── .env.template                   # Environment template for visualization
 │   └── dashboard.py                    # Streamlit dashboard application
 │
 ├── utils/                              # Utility functions
@@ -309,8 +308,13 @@ decentralized-federated-learning/
 │       ├── test_training_workflow.py   # Training workflow tests
 │       └── test_governance_workflow.py # Governance workflow tests
 │
-└── db/                                 # Database
-    └── init/                           # Database initialization scripts
+├── db/                                 # Database
+│   └── init/                           # Database initialization scripts
+│
+├── scripts/                            # Utility scripts
+│   └── prepare_for_public.sh           # Script to sanitize project for public sharing
+│
+└── .dist/                              # Distribution files
 ```
 
 ### Running Tests
