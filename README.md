@@ -346,6 +346,25 @@ Key security features:
 - Differential privacy for local training
 - Memory-efficient handling of sensitive data
 
+### Repository Security
+
+To maintain security when using this codebase, certain files are intentionally excluded from version control:
+
+1. **Environment Files**: All `.env` files containing secrets (except the template)
+2. **Private Keys**: Any files with private keys, including Ethereum wallet keys
+3. **Authentication Secrets**: JWT secrets and API keys
+4. **Deployment Configurations**: Production deployment configurations with real endpoints
+5. **Model Files**: Trained model weights that may contain sensitive information
+6. **Database Data**: Local database files and data directories
+
+Before deployment to production:
+- Generate new secure private keys for all system accounts
+- Set strong JWT secrets
+- Update API endpoints to use secure URLs
+- Configure proper rate limiting based on your expected traffic
+
+**Never commit sensitive information to public repositories.** If you accidentally commit sensitive data, consider it compromised and regenerate all affected credentials immediately.
+
 ## License
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

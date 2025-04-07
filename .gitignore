@@ -1,0 +1,123 @@
+# Sensitive environment and configuration files
+.env
+.env.*
+!.env.template
+*.pem
+*.key
+*.cert
+*_private_key*
+
+# Blockchain-specific
+**/deployed/
+**/artifacts/
+**/cache/
+**/build/
+gas-report.txt
+typechain-types/
+.openzeppelin/
+blockchain_data/
+**/mnemonic.txt
+coverage.json
+coverage/
+
+# AI model and data files
+*.h5
+*.pkl
+*.bin
+*.pb
+*.pt
+*.pth
+*.onnx
+*.tflite
+**/models/weights/
+**/data/raw/
+**/checkpoints/
+model_storage/
+
+# Database
+*.sqlite
+*.sqlite3
+*.db
+/db/data/
+postgres_data/
+redis_data/
+
+# Infrastructure
+*.tfstate
+*.tfstate.backup
+.terraform/
+terraform.tfvars
+*.tfvars.json
+
+# Container and infrastructure
+docker-compose.override.yml
+docker-compose.prod.yml
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.venv/
+venv/
+ENV/
+
+# Node.js
+node_modules/
+npm-debug.log
+yarn-debug.log
+yarn-error.log
+.pnpm-debug.log
+.yarn-integrity
+package-lock.json
+yarn.lock
+.npm
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+.project
+.classpath
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# OS specific
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db 
