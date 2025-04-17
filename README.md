@@ -343,7 +343,6 @@ npx hardhat test
 
 ## Security Considerations
 
-Review our [Security Audit Documentation](docs/smart-contract-audit.md) for a comprehensive security overview.
 
 Key security features:
 - Enhanced Ethereum signature verification
