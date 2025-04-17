@@ -384,8 +384,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ---
 
-For more information, visit our [documentation](docs/README.md) or contact the team at your-email@example.com.
-
 ## Troubleshooting
 
 ### Common Issues
